@@ -1,0 +1,18 @@
+{
+  "displayName": "Developer build",
+  "discordWebhook": "",
+  "targets": [
+    {
+      "label": "ChromaCube",
+      "hostname": "chromacube.deforce.site",
+      "protocol": "tcp",
+      "mcHost": "chromacube"
+    },
+    {
+      "label": "HBM",
+      "hostname": "hbm.deforce.site",
+      "protocol": "tcp",
+      "mcHost": "hbm"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+name = "launcher-config"
+main = "launcher-worker.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+# Served on a dedicated subdomain via a Worker Custom Domain.
+routes = [
+  { pattern = "api.example.com", custom_domain = true }
+]
+
+# Per-user configs live in KV (written by the admin panel, read here).
+# Use the SAME namespace id in admin/wrangler.toml.
+[[kv_namespaces]]
+binding = "LAUNCHER"
+id = "<your-kv-namespace-id>"

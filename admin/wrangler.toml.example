@@ -1,0 +1,23 @@
+name = "launcher-admin"
+main = "admin-worker.js"
+compatibility_date = "2025-01-01"
+
+# Served on its own subdomain (Worker Custom Domain). Protect it with a
+# Cloudflare Access app (allow only your email) before using it.
+routes = [
+  { pattern = "admin.example.com", custom_domain = true }
+]
+
+[vars]
+CF_ACCOUNT_ID = "<your-cloudflare-account-id>"
+ADMIN_EMAIL = "you@example.com"
+# DISCORD_WEBHOOK = "https://discord.com/api/webhooks/..."  # optional override
+
+# Shared KV: the same namespace the launcher-config Worker reads.
+[[kv_namespaces]]
+binding = "LAUNCHER"
+id = "<your-kv-namespace-id>"
+
+# The API token is a SECRET. Never put it here; set it with:
+#   wrangler secret put CF_API_TOKEN
+# (needs Access: Service Tokens Edit + Apps and Policies Edit)

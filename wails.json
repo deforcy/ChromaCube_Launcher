@@ -1,0 +1,16 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "ChromaCube Launcher",
+  "outputfilename": "chromacube-launcher",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "deforce"
+  },
+  "info": {
+    "productName": "ChromaCube Launcher",
+    "comments": "One-click Cloudflare Tunnel launcher for private Minecraft servers."
+  }
+}
