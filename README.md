@@ -1,5 +1,5 @@
 <p align="center">
-<img width="400" height="400" alt="CC" src="https://github.com/user-attachments/assets/bc99c97c-bf90-4427-945b-91ed86fded41" />
+<img width="400" height="400" alt="CC" src="https://github.com/user-attachments/assets/56dbb148-389e-42a9-976e-1ded7253ee3a" />
 
 # ChromaCube Launcher
 
