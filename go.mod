@@ -1,4 +1,4 @@
-module untitled
+module chromacube_launcher
 
 go 1.22.0
 
