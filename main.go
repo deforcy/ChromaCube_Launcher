@@ -25,17 +25,28 @@ var defaultConfig []byte
 func main() {
 	app := NewApp(defaultConfig)
 
+	// Only one instance may run, so we never get duplicate tray icons. A post-
+	// update relaunch waits briefly for the outgoing instance to release the lock.
+	// A plain duplicate launch nudges the running instance to show itself, then exits.
+	if !acquireInstanceLock(app.justUpdated) {
+		nudgeExistingInstance()
+		return
+	}
+
+	// Start hidden in the tray ONLY when launched at system logon (the autostart
+	// task passes --tray). A direct launch, or a post-update relaunch, opens the
+	// window. First run always shows the window so the user can enter their code.
+	startHidden := app.startInTray && !app.needsCode
+
 	// Wails owns the main goroutine / UI thread. All process management happens
 	// in the App, driven by the bound methods and the lifecycle hooks below.
 	err := wails.Run(&options.App{
-		Title:     "ChromaCube Launcher",
-		Width:     920,
-		Height:    560,
-		MinWidth:  720,
-		MinHeight: 460,
-		// Start hidden in the tray once the app is configured; show the window on
-		// first run so the user can enter their access code.
-		StartHidden: !app.needsCode,
+		Title:       "ChromaCube Launcher",
+		Width:       920,
+		Height:      560,
+		MinWidth:    720,
+		MinHeight:   460,
+		StartHidden: startHidden,
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},

@@ -52,6 +52,9 @@ type App struct {
 	latestVersion    string // latest published version (from the manifest)
 	skipHostsCleanup bool   // set during self-update: the new instance owns the hosts block
 
+	startInTray bool // launched at system logon (--tray): start hidden in the tray
+	justUpdated bool // launched right after a self-update (--updated): show what changed
+
 	hostnameMode bool         // any target uses hosts-file redirection
 	hostsEntries []hostsEntry // managed hosts entries for those targets
 
@@ -121,6 +124,8 @@ func NewApp(defaultCfg []byte) *App {
 		defaultCfg:   defaultCfg,
 		byID:         map[string]*tunnel{},
 		binaryStatus: "Checking cloudflared…",
+		startInTray:  hasArg("--tray"),
+		justUpdated:  hasArg("--updated"),
 	}
 
 	base, err := os.UserConfigDir()
@@ -220,8 +225,20 @@ func (a *App) startup(ctx context.Context) {
 	// System tray (close-to-tray, start-in-tray). No-op on non-Windows.
 	a.startTray()
 
+	// Surface the window if a second launch nudges us via the instance lock.
+	go serveInstanceLock(a.showWindow)
+
 	// Live per-server ping (Minecraft Server List Ping through the tunnel).
 	go a.pingLoop()
+
+	// Re-check the published version periodically so a running app locks itself
+	// when a new version ships, without needing a restart.
+	go a.updateCheckLoop()
+
+	// If we were just relaunched by a self-update, show what changed.
+	if a.justUpdated {
+		go a.announceUpdate()
+	}
 
 	// Keep the Windows autostart entry in sync with the saved preference.
 	_ = applyAutostart(a.loadSettings().Autostart)
@@ -281,7 +298,9 @@ func (a *App) checkUpdate() {
 		return
 	}
 	a.latestVersion = info.Latest
+	newlyRequired := false
 	if isUpdateRequired(appVersion, info.Latest) {
+		newlyRequired = !a.updateRequired
 		a.updateRequired = true
 		a.updateURL = info.URL
 	}
@@ -292,6 +311,14 @@ func (a *App) checkUpdate() {
 			"latest":   a.latestVersion,
 			"current":  appVersion,
 		})
+	}
+	// If we only just fell behind mid-session, drop the tunnels so the lock is
+	// enforced rather than cosmetic, and surface the window so the user sees it.
+	if newlyRequired {
+		a.DisconnectAll()
+		if a.ctx != nil {
+			runtime.WindowShow(a.ctx)
+		}
 	}
 }
 
@@ -350,10 +377,13 @@ func (a *App) SelfUpdate() error {
 	}
 
 	a.emitUpdateProgress("Restarting...", true)
-	if err := relaunch(self); err != nil {
+	// Relaunch visibly (no --tray) and flag it so the new copy shows what changed.
+	if err := relaunch(self, "--updated"); err != nil {
 		a.emitUpdateProgress("", false)
 		return fmt.Errorf("updated, but could not relaunch - please start the app again: %w", err)
 	}
+	// Remove our tray icon now so the outgoing instance does not leave a ghost.
+	a.stopTray()
 
 	// Hand off to the new instance: leave the hosts block in place (the new
 	// process owns it now) and really quit.
@@ -399,11 +429,50 @@ func (a *App) pingLoop() {
 	}
 }
 
-// showWindow brings the hidden (tray) window back to the foreground.
+// showWindow brings the hidden (tray) window back to the foreground and re-checks
+// for a new version (so reopening from the tray behaves like a fresh check).
 func (a *App) showWindow() {
 	if a.ctx != nil {
 		runtime.WindowShow(a.ctx)
+		go a.checkUpdate()
 	}
+}
+
+// updateCheckLoop re-checks the published version on an interval. Once the app is
+// locked there is nothing more to do, so it stops.
+func (a *App) updateCheckLoop() {
+	ticker := time.NewTicker(updateCheckInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if a.updateRequired {
+			return
+		}
+		a.checkUpdate()
+	}
+}
+
+// announceUpdate shows the "what changed" popup after a self-update, using the
+// latest GitHub release notes.
+func (a *App) announceUpdate() {
+	tag, body := fetchLatestRelease()
+	if a.ctx == nil {
+		return
+	}
+	runtime.EventsEmit(a.ctx, "updated", map[string]interface{}{
+		"version": appVersion,
+		"tag":     tag,
+		"notes":   body,
+	})
+}
+
+// hasArg reports whether the process was launched with the given flag.
+func hasArg(flag string) bool {
+	for _, a := range os.Args[1:] {
+		if a == flag {
+			return true
+		}
+	}
+	return false
 }
 
 // quitApp performs a real quit (from the tray "Close" item), as opposed to the
@@ -435,6 +504,7 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 // is harmless and guarantees no orphaned processes or stale hosts entries
 // survive us.
 func (a *App) shutdown(ctx context.Context) {
+	a.stopTray() // remove the tray icon so it does not linger after we exit
 	a.DisconnectAll()
 	// During a self-update the freshly launched instance owns the hosts block, so
 	// the outgoing process must not strip it out from under the new one.

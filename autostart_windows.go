@@ -24,9 +24,11 @@ func applyAutostart(enable bool) error {
 		if err != nil {
 			return err
 		}
+		// Pass --tray so a logon launch starts minimized to the tray. The exe path
+		// is quoted to survive spaces; --tray is outside the quotes as an argument.
 		return runHidden("schtasks", "/Create",
 			"/TN", autostartTask,
-			"/TR", exe, // exec quotes this; handles spaces in the path
+			"/TR", `"`+exe+`" --tray`,
 			"/SC", "ONLOGON",
 			"/RL", "HIGHEST",
 			"/F",

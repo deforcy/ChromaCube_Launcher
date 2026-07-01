@@ -22,6 +22,10 @@ const (
 	oldUpdateName = ".chromacube-old.exe"
 )
 
+// How often a running app re-checks the published version (it also re-checks
+// whenever the window is brought back from the tray).
+const updateCheckInterval = 15 * time.Minute
+
 // updateInfo is the version manifest the launcher Worker serves at
 // remoteConfigURL + "version" (set from the admin panel). When the running
 // build is older than Latest, the app locks itself behind the update screen.
@@ -156,10 +160,40 @@ func verifySHA256(path, want string) error {
 // relaunch starts a fresh copy of the binary at path and returns immediately.
 // The current process (already elevated) hands its token to the child, so no new
 // UAC prompt appears.
-func relaunch(path string) error {
-	cmd := exec.Command(path)
+func relaunch(path string, args ...string) error {
+	cmd := exec.Command(path, args...)
 	cmd.Dir = filepath.Dir(path)
 	return cmd.Start()
+}
+
+// fetchLatestRelease returns the tag and body of the repo's latest GitHub
+// release, used to show "what changed" after a self-update. Best effort.
+func fetchLatestRelease() (tag, body string) {
+	if githubRepo == "" {
+		return "", ""
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	req, err := http.NewRequest("GET", "https://api.github.com/repos/"+githubRepo+"/releases/latest", nil)
+	if err != nil {
+		return "", ""
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", ""
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+		Body    string `json:"body"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", ""
+	}
+	return rel.TagName, rel.Body
 }
 
 // cleanupOldUpdate removes the previous binary left over from a self-update swap.

@@ -317,4 +317,40 @@ h1 { font-size: 17px; margin: 0; }
 .update-card .btn-big { width: 100%; }
 .update-status { margin: 0; font-size: 12px; color: var(--muted); }
 
+/* "What changed" popup */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.modal-card {
+  max-width: 460px;
+  width: 100%;
+  max-height: 80vh;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.modal-card h2 { margin: 0; font-size: 17px; }
+.whatsnew-notes {
+  overflow-y: auto;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.modal-card .btn { align-self: flex-end; }
+
 .hidden { display: none !important; }

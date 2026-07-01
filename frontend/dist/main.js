@@ -47,6 +47,8 @@ function init() {
     el.classList.remove("hidden");
   });
 
+  window.runtime.EventsOn("updated", (d) => showWhatsNew(d));
+
   window.runtime.EventsOn("auth", (a) => showAuthBanner(a.url));
 
   window.runtime.EventsOn("hostsError", (h) => {
@@ -101,7 +103,23 @@ function init() {
     });
   };
 
+  document.getElementById("whatsnew-close").onclick = () => {
+    document.getElementById("whatsnew-screen").classList.add("hidden");
+  };
+
   App.GetState().then(renderFromState);
+}
+
+// Show the post-update popup with the release notes.
+function showWhatsNew(d) {
+  if (!d) return;
+  const title = document.getElementById("whatsnew-title");
+  const notes = document.getElementById("whatsnew-notes");
+  const ver = d.tag || (d.version ? "v" + d.version : "");
+  title.textContent = ver ? "Updated to " + ver : "Updated";
+  const body = (d.notes || "").trim();
+  notes.textContent = body || "The launcher was updated to the latest version.";
+  document.getElementById("whatsnew-screen").classList.remove("hidden");
 }
 
 function openSettings() {

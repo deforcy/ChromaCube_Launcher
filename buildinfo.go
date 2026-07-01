@@ -22,6 +22,9 @@ var (
 	// so on first launch it prompts the user for their personal code (and then
 	// remembers it). Default "false" = developer build using the embedded config.
 	requireUserCode = "false"
+
+	// githubRepo (owner/name) is used to show release notes after a self-update.
+	githubRepo = "deforcy/ChromaCube_Launcher"
 )
 
 // codeMode reports whether this build identifies users by a typed-in code (a

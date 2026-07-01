@@ -2,5 +2,6 @@
 
 package main
 
-// startTray is a no-op on non-Windows platforms (the tray is Windows-only here).
+// startTray/stopTray are no-ops on non-Windows platforms (tray is Windows-only).
 func (a *App) startTray() {}
+func (a *App) stopTray()  {}
