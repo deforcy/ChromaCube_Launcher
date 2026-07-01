@@ -1,0 +1,26 @@
+# Wails / Go build output
+/build/bin/
+*.exe
+*.app
+
+# Go
+/vendor/
+
+# Cloudflare wrangler (may cache auth / build artifacts)
+.wrangler/
+node_modules/
+
+# Account-specific Worker config (account id, email, KV id). Use the .example files.
+worker/wrangler.toml
+admin/wrangler.toml
+
+# Generated Wails bindings
+frontend/wailsjs/
+
+# IDE / editor
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
