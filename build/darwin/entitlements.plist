@@ -1,0 +1,18 @@
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The launcher is intentionally NOT sandboxed: it downloads and runs the
+         cloudflared binary and edits /etc/hosts, neither of which is possible
+         inside the App Sandbox. These entitlements only matter if you sign with
+         the Hardened Runtime for notarized distribution. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+    <!-- Allow launching the downloaded cloudflared (unsigned by our cert). -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

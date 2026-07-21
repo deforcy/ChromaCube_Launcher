@@ -86,5 +86,8 @@ func writeHostsBlock(entries []hostsEntry) error {
 		b.WriteString(hostsEnd + nl)
 	}
 
-	return os.WriteFile(path, []byte(b.String()), 0o644)
+	// commitHostsFile is platform-specific: a plain write on Windows/Linux, and an
+	// elevated write (osascript "with administrator privileges") on macOS, where
+	// the app is not guaranteed to already run as root.
+	return commitHostsFile(path, []byte(b.String()))
 }

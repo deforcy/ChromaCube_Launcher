@@ -1,0 +1,55 @@
+# Builds the ChromaCube Launcher .app on a real macOS runner (GitHub-hosted),
+# which is the way to produce the macOS build without owning a Mac.
+#
+# This workflow assumes the repository root IS this `macos/` folder (i.e. you
+# push the contents of macos/ as a repo). If instead macos/ is a subdirectory,
+# set `working-directory: macos` on the build steps and adjust the artifact path.
+#
+# Trigger it from the Actions tab (workflow_dispatch) or on a tag push.
+
+name: build-macos
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string baked into the app"
+        default: "1.4.3"
+      target:
+        description: "universal | intel | applesilicon"
+        default: "universal"
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: macos-14   # Apple-Silicon runner; builds universal (Intel + arm64) fine
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Build .app
+        env:
+          VERSION: ${{ github.event.inputs.version || '1.4.3' }}
+          # To bake a group code or custom endpoint, uncomment / set as secrets:
+          # CODE: ${{ secrets.LAUNCHER_CODE }}
+          # REMOTE_URL: https://api.deforce.site/
+        run: |
+          chmod +x build-macos.sh
+          ./build-macos.sh "${{ github.event.inputs.target || 'universal' }}"
+
+      - name: Zip the .app
+        run: |
+          cd build/bin
+          ditto -c -k --keepParent *.app ChromaCube-Launcher-macos.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ChromaCube-Launcher-macos
+          path: build/bin/ChromaCube-Launcher-macos.zip

@@ -11,7 +11,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$Code,
   [string]$Name = "chromacube-launcher",
-  [string]$Version = "1.0.0",
+  [string]$Version = "1.4.3",
   [string]$RemoteURL = ""
 )
 
