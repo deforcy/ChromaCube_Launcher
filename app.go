@@ -3,13 +3,20 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -38,6 +45,13 @@ type App struct {
 	dataDir    string
 	defaultCfg []byte
 
+	// stateMu guards the config-derived collections below (cfg, order, byID,
+	// hostsEntries, hostnameMode, displayName, needsCode). They are rebuilt at
+	// startup, on code submit/clear, and - crucially - mutated live by the config
+	// refresh loop when the admin changes a user's access, so every reader takes
+	// a snapshot under this lock.
+	stateMu sync.RWMutex
+
 	cfg   Config
 	order []*tunnel          // config order, for stable UI rendering
 	byID  map[string]*tunnel // id -> tunnel
@@ -46,6 +60,10 @@ type App struct {
 	reallyQuit  bool   // true once the user chose Close from the tray menu
 	displayName string // who this user/group is (from remote config)
 	installID   string // stable per-install id, for log correlation
+
+	// whatsNew is the post-update "what changed" payload, captured at update time
+	// (see writePendingWhatsNew) so it is shown reliably. Nil unless just updated.
+	whatsNew map[string]interface{}
 
 	updateRequired   bool   // build is older than the published version: locked
 	updateURL        string // where to download the new build
@@ -82,12 +100,14 @@ type tunnel struct {
 	cmd      *exec.Cmd
 	cancel   context.CancelFunc
 	ctrl     *processController
+	websrv   *http.Server // web targets: the in-process reverse proxy (no cloudflared)
 
 	// st guards the observable status fields below.
-	st      sync.Mutex
-	status  string
-	message string
-	lastErr string
+	st        sync.Mutex
+	status    string
+	message   string
+	lastErr   string
+	discarded bool // removed by a live config change: suppress further UI events
 }
 
 // TargetState is the snapshot sent to the UI for one target.
@@ -100,21 +120,26 @@ type TargetState struct {
 	LocalAddr string `json:"localAddr"`
 	Status    string `json:"status"`
 	Message   string `json:"message"`
+	Web       bool   `json:"web"`       // web target: opened in a browser, not Minecraft
+	WebURL    string `json:"webURL"`    // http URL to open for a web target (else "")
+	CoupledTo string `json:"coupledTo"` // web target: Hostname of the server it embeds into
 }
 
 // AppState is the full snapshot the UI requests on load.
 type AppState struct {
 	BinaryReady  bool          `json:"binaryReady"`
 	BinaryStatus string        `json:"binaryStatus"`
-	NeedsCode    bool          `json:"needsCode"`    // show the access-code entry screen
-	CodeMode     bool          `json:"codeMode"`     // build identifies users by typed code
-	DisplayName  string        `json:"displayName"`  // current user/group label
+	NeedsCode    bool          `json:"needsCode"`   // show the access-code entry screen
+	CodeMode     bool          `json:"codeMode"`    // build identifies users by typed code
+	DisplayName  string        `json:"displayName"` // current user/group label
 	Targets      []TargetState `json:"targets"`
 
 	UpdateRequired bool   `json:"updateRequired"` // lock the UI behind the update screen
 	UpdateURL      string `json:"updateURL"`      // download link for the new build
 	LatestVersion  string `json:"latestVersion"`  // latest published version
 	AppVersion     string `json:"appVersion"`     // this build's version
+
+	WhatsNew map[string]interface{} `json:"whatsNew,omitempty"` // post-update notes, if any
 }
 
 // NewApp builds the App, resolving the data dir and loading config up front so
@@ -178,10 +203,13 @@ func (a *App) applyConfig(cfg Config) {
 	if a.log != nil {
 		a.log.close()
 	}
+	a.log = newLogger(a.dataDir, cfg.DiscordWebhook, buildSessionInfo(displayNameFor(cfg.DisplayName), a.installID))
+
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+
 	a.cfg = cfg
 	a.displayName = displayNameFor(cfg.DisplayName)
-	a.log = newLogger(a.dataDir, cfg.DiscordWebhook, buildSessionInfo(a.displayName, a.installID))
-
 	a.order = nil
 	a.byID = map[string]*tunnel{}
 	a.hostsEntries = nil
@@ -193,13 +221,20 @@ func (a *App) applyConfig(cfg Config) {
 			status:  StatusIdle,
 			message: "Not connected",
 		}
-		if tgt.McHost != "" {
+		if tgt.Web {
+			// Web targets open in a browser, which resolves *.localhost to loopback
+			// natively (RFC 6761) - bypassing the hosts file AND Secure DNS/DoH,
+			// neither of which a made-up hosts name survives for XHR/fetch. So we
+			// bind 127.0.0.1 (where *.localhost points) and write NO hosts entry.
+			t.BindIP = "127.0.0.1"
+			t.BindPort = mcBindPort(tgt)
+		} else if tgt.McHost != "" {
 			// Hostname mode: give each target its own loopback IP (127.0.0.1,
 			// 127.0.0.2, ...) and bind on Minecraft's default port so the player
 			// types a bare hostname. The hosts file maps McHost -> this IP.
 			t.HostnameMode = true
 			t.BindIP = fmt.Sprintf("127.0.0.%d", loopIdx+1)
-			t.BindPort = mcDefaultPort
+			t.BindPort = mcBindPort(tgt)
 			loopIdx++
 			a.hostsEntries = append(a.hostsEntries, hostsEntry{IP: t.BindIP, Host: tgt.McHost})
 		} else {
@@ -210,6 +245,42 @@ func (a *App) applyConfig(cfg Config) {
 		a.byID[t.ID] = t
 	}
 	a.hostnameMode = len(a.hostsEntries) > 0
+}
+
+// mcBindPort is the local port a hostname-mode target binds: its web port for a
+// web target, otherwise Minecraft's default port.
+func mcBindPort(t Target) int {
+	if t.Web {
+		if t.WebPort > 0 {
+			return t.WebPort
+		}
+		return 80
+	}
+	return mcDefaultPort
+}
+
+// snapshotOrder returns a copy of the current tunnel order safe to range over
+// without holding the lock (the underlying tunnels are shared pointers).
+func (a *App) snapshotOrder() []*tunnel {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	out := make([]*tunnel, len(a.order))
+	copy(out, a.order)
+	return out
+}
+
+// lookup resolves a tunnel by id under the state lock.
+func (a *App) lookup(id string) *tunnel {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.byID[id]
+}
+
+// isNeedsCode reports whether the app is currently waiting for an access code.
+func (a *App) isNeedsCode() bool {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	return a.needsCode
 }
 
 // ----- Wails lifecycle hooks -------------------------------------------------
@@ -235,8 +306,16 @@ func (a *App) startup(ctx context.Context) {
 	// when a new version ships, without needing a restart.
 	go a.updateCheckLoop()
 
-	// If we were just relaunched by a self-update, show what changed.
+	// Re-fetch this user's config on an interval so access changes made in the
+	// admin panel (a server granted or revoked) take effect live - including
+	// force-disconnecting a server the user just lost access to.
+	go a.configRefreshLoop()
+
+	// If we were just relaunched by a self-update, show what changed. Load the
+	// notes captured at update time (synchronously, so GetState already carries
+	// them when the UI first asks), then also push them as an event.
 	if a.justUpdated {
+		a.loadPendingWhatsNew()
 		go a.announceUpdate()
 	}
 
@@ -376,6 +455,10 @@ func (a *App) SelfUpdate() error {
 		return fmt.Errorf("could not install the new version: %w", err)
 	}
 
+	// Capture the notes for THIS update now, while we still have the manifest in
+	// hand, so the relaunched build shows them reliably (no re-fetch/race).
+	a.writePendingWhatsNew(info.Notes)
+
 	a.emitUpdateProgress("Restarting...", true)
 	// Relaunch visibly (no --tray) and flag it so the new copy shows what changed.
 	if err := relaunch(self, "--updated"); err != nil {
@@ -405,21 +488,40 @@ func (a *App) emitUpdateProgress(message string, busy bool) {
 	})
 }
 
-// pingLoop measures latency to each connected server every few seconds and
-// emits "ping" events ({id, ms}; ms = -1 means unreachable).
+// pingLoop measures latency to each running server every few seconds via a
+// Server List Ping and emits "ping" events ({id, ms, motd, ...}; ms = -1 means
+// unreachable). It also treats a successful ping as ground truth that the server
+// is reachable: if the tunnel got stuck showing an error after a transient
+// cloudflared hiccup, a good ping clears it back to "connected".
 func (a *App) pingLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		for _, t := range a.order {
-			if t.currentStatus() != StatusConnected {
+		for _, t := range a.snapshotOrder() {
+			// Web targets speak HTTP, not the Minecraft Server List Ping - skip them.
+			if t.Web {
+				continue
+			}
+			st := t.currentStatus()
+			// Ping while the local listener is up (connected) or wrongly stuck in
+			// error - the ping is what tells us which one it really is.
+			if !t.isRunning() || (st != StatusConnected && st != StatusError) {
 				continue
 			}
 			go func(t *tunnel) {
-				ms, err := pingMinecraft(t.localAddr())
+				status, err := pingServer(t.localAddr())
 				payload := map[string]interface{}{"id": t.ID, "ms": -1}
 				if err == nil {
-					payload["ms"] = ms
+					payload["ms"] = status.Ms
+					payload["motd"] = status.Motd
+					payload["playersOnline"] = status.PlayersOn
+					payload["playersMax"] = status.PlayersMax
+					payload["version"] = status.Version
+					payload["favicon"] = status.Favicon
+					// The server answered, so any earlier error was transient.
+					if t.currentStatus() == StatusError && t.isRunning() {
+						t.setStatus(a, StatusConnected, "Connected")
+					}
 				}
 				if a.ctx != nil {
 					runtime.EventsEmit(a.ctx, "ping", payload)
@@ -451,18 +553,316 @@ func (a *App) updateCheckLoop() {
 	}
 }
 
-// announceUpdate shows the "what changed" popup after a self-update, using the
-// latest GitHub release notes.
-func (a *App) announceUpdate() {
-	tag, body := fetchLatestRelease()
-	if a.ctx == nil {
+// configRefreshInterval is how often a running app re-fetches its config so that
+// access changes (a server granted or revoked) take effect without a restart.
+const configRefreshInterval = 30 * time.Second
+
+// configRefreshLoop periodically re-fetches this user's config from the Worker
+// and reconciles it against the running tunnels. Granting a server makes it
+// appear; dropping one force-disconnects it; a fully revoked code (HTTP 404)
+// sends the user back to the code screen. Only meaningful when we have a code
+// (universal builds, or a baked group code). Transient network errors are
+// ignored - we keep the current config until the next tick.
+func (a *App) configRefreshLoop() {
+	// Never poll faster than this; the endpoint is cheap but this is background.
+	ticker := time.NewTicker(configRefreshInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if a.updateRequired || a.isNeedsCode() {
+			continue
+		}
+		code := a.resolvedCode()
+		if code == "" {
+			continue
+		}
+		cfg, err := fetchRemoteConfig(a.dataDir, code)
+		if err != nil {
+			if errors.Is(err, errCodeRevoked) {
+				a.handleRevoked()
+			}
+			continue // transient errors: keep the current config
+		}
+		a.reconcileConfig(cfg)
+	}
+}
+
+// reconcileConfig diffs a freshly fetched config against the running tunnels and
+// applies the difference in place: tunnels for dropped targets are stopped and
+// removed, tunnels for new targets are added (and started if the network is
+// currently up), and unchanged targets are left running untouched. It also keeps
+// the hosts file in sync with the new set.
+func (a *App) reconcileConfig(cfg Config) {
+	a.stateMu.Lock()
+
+	oldByKey := map[string]*tunnel{}
+	for _, t := range a.order {
+		oldByKey[targetKey(t.Target)] = t
+	}
+
+	// Decide what to keep, and remember which loopback octets kept hostname-mode
+	// tunnels occupy so newly added ones don't collide with a live listener.
+	wantKeys := map[string]bool{}
+	kept := map[string]*tunnel{}
+	usedOctet := map[int]bool{}
+	for _, tgt := range cfg.Targets {
+		k := targetKey(tgt)
+		wantKeys[k] = true
+		if ex, ok := oldByKey[k]; ok {
+			kept[k] = ex
+			if ex.HostnameMode {
+				usedOctet[octetOf(ex.BindIP)] = true
+			}
+		}
+	}
+
+	nextOctet := func() int {
+		for i := 1; ; i++ {
+			if !usedOctet[i] {
+				usedOctet[i] = true
+				return i
+			}
+		}
+	}
+	nextID := a.maxTunnelNumLocked()
+
+	var newOrder []*tunnel
+	var toStart []*tunnel
+	for _, tgt := range cfg.Targets {
+		k := targetKey(tgt)
+		if ex, ok := kept[k]; ok {
+			newOrder = append(newOrder, ex)
+			continue
+		}
+		nextID++
+		t := &tunnel{
+			Target:  tgt,
+			ID:      fmt.Sprintf("t%d", nextID),
+			status:  StatusIdle,
+			message: "Not connected",
+		}
+		if tgt.Web {
+			// See applyConfig: web targets use *.localhost + 127.0.0.1, no hosts entry.
+			t.BindIP = "127.0.0.1"
+			t.BindPort = mcBindPort(tgt)
+		} else if tgt.McHost != "" {
+			t.HostnameMode = true
+			t.BindIP = fmt.Sprintf("127.0.0.%d", nextOctet())
+			t.BindPort = mcBindPort(tgt)
+		} else {
+			t.BindIP = "127.0.0.1"
+			t.BindPort = tgt.LocalPort
+		}
+		newOrder = append(newOrder, t)
+		toStart = append(toStart, t)
+	}
+
+	var toStop []*tunnel
+	for _, t := range a.order {
+		if !wantKeys[targetKey(t.Target)] {
+			toStop = append(toStop, t)
+		}
+	}
+
+	// If nothing structural changed, bail without touching anything.
+	if len(toStop) == 0 && len(toStart) == 0 {
+		a.stateMu.Unlock()
 		return
 	}
-	runtime.EventsEmit(a.ctx, "updated", map[string]interface{}{
-		"version": appVersion,
-		"tag":     tag,
-		"notes":   body,
-	})
+
+	// Swap in the new collections + hosts entries.
+	a.order = newOrder
+	a.byID = map[string]*tunnel{}
+	for _, t := range newOrder {
+		a.byID[t.ID] = t
+	}
+	a.cfg.Targets = cfg.Targets
+	if cfg.DisplayName != "" {
+		a.displayName = displayNameFor(cfg.DisplayName)
+	}
+	a.hostsEntries = nil
+	for _, t := range newOrder {
+		if t.HostnameMode {
+			a.hostsEntries = append(a.hostsEntries, hostsEntry{IP: t.BindIP, Host: t.McHost})
+		}
+	}
+	a.hostnameMode = len(a.hostsEntries) > 0
+	networkOn := false
+	for _, t := range newOrder {
+		if t.isRunning() {
+			networkOn = true
+			break
+		}
+	}
+	a.stateMu.Unlock()
+
+	// Apply outside the lock (start/stop block on process I/O).
+	for _, t := range toStop {
+		// Discard first so the async "stopped" from stop() is swallowed and can't
+		// re-create the card we're about to remove.
+		t.markDiscarded()
+		t.stop(a)
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "removed", map[string]string{"id": t.ID})
+		}
+	}
+	// Rewrite (or clear) the managed hosts block for the new set.
+	if a.hostnameMode {
+		a.installHosts()
+	} else {
+		a.removeHosts()
+	}
+	for _, t := range toStart {
+		if networkOn {
+			_ = t.start(a) // start() emits its own "status" event, rendering the card
+		} else if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "status", t.state()) // just show it idle
+		}
+	}
+	if a.log != nil {
+		a.log.line("system", "config",
+			fmt.Sprintf("live access update: +%d server(s), -%d server(s)", len(toStart), len(toStop)))
+	}
+}
+
+// handleRevoked responds to the Worker reporting this code is no longer valid:
+// drop every tunnel and send the user back to the access-code screen with a
+// notice. For a baked group build (no code screen) we simply disconnect and
+// surface the state through the log.
+func (a *App) handleRevoked() {
+	if a.isNeedsCode() {
+		return // already back at the code screen (nothing more to do)
+	}
+	// Baked group build: there is no code screen, so just make sure the tunnels
+	// are down. Only act (and log) when something is actually running, so a
+	// permanently-revoked group build doesn't spam the log every poll.
+	if !codeMode() {
+		running := false
+		for _, t := range a.snapshotOrder() {
+			if t.isRunning() {
+				running = true
+				break
+			}
+		}
+		if running {
+			if a.log != nil {
+				a.log.line("system", "access", "access was revoked by the admin")
+			}
+			a.DisconnectAll()
+		}
+		return
+	}
+	if a.log != nil {
+		a.log.line("system", "access", "access was revoked by the admin")
+	}
+	a.resetToCodeEntry()
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "revoked",
+			map[string]string{"message": "Your access was revoked. Enter a new code to continue."})
+		runtime.EventsEmit(a.ctx, "reloaded", a.GetState())
+		runtime.WindowShow(a.ctx)
+	}
+}
+
+// maxTunnelNumLocked returns the highest N among "tN" tunnel ids currently in
+// a.order (or -1 if none), so reconcile can mint fresh, non-colliding ids. Must
+// be called with stateMu held.
+func (a *App) maxTunnelNumLocked() int {
+	max := -1
+	for _, t := range a.order {
+		if strings.HasPrefix(t.ID, "t") {
+			if n, err := strconv.Atoi(t.ID[1:]); err == nil && n > max {
+				max = n
+			}
+		}
+	}
+	return max
+}
+
+// targetKey is a stable identity for a target across config refreshes, so an
+// unchanged target keeps its running tunnel while genuinely new/removed ones are
+// detected.
+func targetKey(t Target) string {
+	return strings.Join([]string{
+		t.Protocol, t.Hostname, t.McHost,
+		strconv.Itoa(t.LocalPort), strconv.FormatBool(t.Web),
+	}, "|")
+}
+
+// octetOf returns the last octet of a "127.0.0.N" loopback IP (0 if unparsable).
+func octetOf(ip string) int {
+	if i := strings.LastIndexByte(ip, '.'); i >= 0 {
+		if n, err := strconv.Atoi(ip[i+1:]); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// pendingWhatsNewName is the file the outgoing updater drops the release notes
+// into, so the freshly relaunched build can show them without any network call.
+const pendingWhatsNewName = "pending-whatsnew.json"
+
+// writePendingWhatsNew records the notes for the build we are about to install,
+// so the new instance shows exactly them (no re-fetch, no KV-consistency lag, no
+// event-timing race). Called by SelfUpdate right before relaunch.
+func (a *App) writePendingWhatsNew(notes string) {
+	if strings.TrimSpace(notes) == "" {
+		return
+	}
+	data, err := json.Marshal(map[string]string{"notes": notes})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(a.dataDir, pendingWhatsNewName), data, 0o644)
+}
+
+// loadPendingWhatsNew consumes the notes file left by the previous (updating)
+// instance into a.whatsNew. It is a one-shot: the file is deleted immediately.
+func (a *App) loadPendingWhatsNew() {
+	path := filepath.Join(a.dataDir, pendingWhatsNewName)
+	data, err := os.ReadFile(path)
+	_ = os.Remove(path)
+	if err != nil {
+		return
+	}
+	var p struct {
+		Notes string `json:"notes"`
+	}
+	if json.Unmarshal(data, &p) != nil || strings.TrimSpace(p.Notes) == "" {
+		return
+	}
+	a.stateMu.Lock()
+	a.whatsNew = map[string]interface{}{"version": appVersion, "notes": p.Notes}
+	a.stateMu.Unlock()
+}
+
+// announceUpdate pushes the "what changed" popup after a self-update. It prefers
+// the notes captured at update time (loadPendingWhatsNew); if none were captured
+// (e.g. updated from a build predating that mechanism) it falls back to the live
+// manifest, then the repo's GitHub release notes. The version shown is this
+// build's baked appVersion.
+func (a *App) announceUpdate() {
+	a.stateMu.RLock()
+	payload := a.whatsNew
+	a.stateMu.RUnlock()
+
+	if payload == nil {
+		notes := ""
+		if info, err := fetchUpdateInfo(); err == nil {
+			notes = strings.TrimSpace(info.Notes)
+		}
+		tag := ""
+		if notes == "" {
+			tag, notes = fetchLatestRelease()
+		}
+		payload = map[string]interface{}{"version": appVersion, "tag": tag, "notes": notes}
+		a.stateMu.Lock()
+		a.whatsNew = payload
+		a.stateMu.Unlock()
+	}
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "updated", payload)
+	}
 }
 
 // hasArg reports whether the process was launched with the given flag.
@@ -517,8 +917,9 @@ func (a *App) shutdown(ctx context.Context) {
 
 // serverLabels lists the configured server names for the session-start embed.
 func (a *App) serverLabels() []string {
-	labels := make([]string, 0, len(a.order))
-	for _, t := range a.order {
+	order := a.snapshotOrder()
+	labels := make([]string, 0, len(order))
+	for _, t := range order {
 		if t.ID == "config-error" {
 			continue
 		}
@@ -556,22 +957,28 @@ func (a *App) GetState() AppState {
 	ready, bs := a.binaryReady, a.binaryStatus
 	a.binMu.Unlock()
 
+	a.stateMu.RLock()
+	needsCode, displayName := a.needsCode, a.displayName
+	whatsNew := a.whatsNew
 	targets := make([]TargetState, 0, len(a.order))
 	for _, t := range a.order {
 		targets = append(targets, t.state())
 	}
+	a.stateMu.RUnlock()
+
 	return AppState{
 		BinaryReady:  ready,
 		BinaryStatus: bs,
-		NeedsCode:    a.needsCode,
+		NeedsCode:    needsCode,
 		CodeMode:     codeMode(),
-		DisplayName:  a.displayName,
+		DisplayName:  displayName,
 		Targets:      targets,
 
 		UpdateRequired: a.updateRequired,
 		UpdateURL:      a.updateURL,
 		LatestVersion:  a.latestVersion,
 		AppVersion:     appVersion,
+		WhatsNew:       whatsNew,
 	}
 }
 
@@ -589,7 +996,9 @@ func (a *App) SubmitAccessCode(code string) error {
 	storeAccessCode(a.dataDir, code)
 
 	a.applyConfig(cfg)
+	a.stateMu.Lock()
 	a.needsCode = false
+	a.stateMu.Unlock()
 	a.log.start()
 	go func() {
 		a.log.resolveLocation()
@@ -607,6 +1016,15 @@ func (a *App) ClearAccessCode() {
 	if !codeMode() {
 		return
 	}
+	a.resetToCodeEntry()
+	runtime.EventsEmit(a.ctx, "reloaded", a.GetState())
+}
+
+// resetToCodeEntry tears down all tunnels, forgets the stored code, and returns
+// the app to the access-code entry state. Shared by the manual "Change code"
+// action and the automatic revocation path. It does NOT emit "reloaded" - the
+// caller decides what to tell the UI (a plain reload vs. a revocation notice).
+func (a *App) resetToCodeEntry() {
 	a.DisconnectAll()
 	a.removeHosts()
 	clearAccessCode(a.dataDir)
@@ -614,6 +1032,7 @@ func (a *App) ClearAccessCode() {
 		a.log.close()
 	}
 
+	a.stateMu.Lock()
 	a.needsCode = true
 	a.cfg = Config{}
 	a.order = nil
@@ -621,10 +1040,10 @@ func (a *App) ClearAccessCode() {
 	a.hostsEntries = nil
 	a.hostnameMode = false
 	a.displayName = displayNameFor("")
+	a.stateMu.Unlock()
+
 	a.log = newLogger(a.dataDir, "", buildSessionInfo(a.displayName, a.installID))
 	a.log.start()
-
-	runtime.EventsEmit(a.ctx, "reloaded", a.GetState())
 }
 
 // Connect starts the tunnel for a single target id.
@@ -632,7 +1051,7 @@ func (a *App) Connect(id string) error {
 	if err := a.ensureBinary(); err != nil {
 		return fmt.Errorf("cloudflared not available: %w", err)
 	}
-	t := a.byID[id]
+	t := a.lookup(id)
 	if t == nil {
 		return fmt.Errorf("unknown target %q", id)
 	}
@@ -641,11 +1060,26 @@ func (a *App) Connect(id string) error {
 
 // Disconnect stops the tunnel for a single target id.
 func (a *App) Disconnect(id string) error {
-	t := a.byID[id]
+	t := a.lookup(id)
 	if t == nil {
 		return fmt.Errorf("unknown target %q", id)
 	}
 	t.stop(a)
+	return nil
+}
+
+// OpenWeb opens a web target (e.g. the live map) in the user's default browser.
+func (a *App) OpenWeb(id string) error {
+	t := a.lookup(id)
+	if t == nil {
+		return fmt.Errorf("unknown target %q", id)
+	}
+	if !t.Web {
+		return fmt.Errorf("%q is not a web target", t.Label)
+	}
+	if a.ctx != nil {
+		runtime.BrowserOpenURL(a.ctx, t.webURL())
+	}
 	return nil
 }
 
@@ -658,14 +1092,14 @@ func (a *App) ConnectAll() {
 		a.emitBinary("error", 0, err.Error())
 		return
 	}
-	for _, t := range a.order {
+	for _, t := range a.snapshotOrder() {
 		_ = t.start(a)
 	}
 }
 
 // DisconnectAll stops every configured tunnel. Safe to call multiple times.
 func (a *App) DisconnectAll() {
-	for _, t := range a.order {
+	for _, t := range a.snapshotOrder() {
 		t.stop(a)
 	}
 }
@@ -683,12 +1117,32 @@ func (t *tunnel) displayAddr() string {
 	return fmt.Sprintf("localhost:%d", t.BindPort)
 }
 
+// webURL is the browser URL for a web target, e.g. "http://map.chromacube"
+// (bare, since it binds port 80) or "http://<host>:<port>" otherwise.
+func (t *tunnel) webURL() string {
+	host := t.McHost
+	if host == "" {
+		host = t.BindIP
+	}
+	if t.BindPort != 80 && t.BindPort != 0 {
+		host = fmt.Sprintf("%s:%d", host, t.BindPort)
+	}
+	return "http://" + host
+}
+
 // start launches `cloudflared access <tcp|udp> --hostname H --url 127.0.0.1:PORT`.
 // It is idempotent: a second call while running is a no-op.
 func (t *tunnel) start(a *App) error {
 	// Guard against the synthetic config-error placeholder (no real target).
 	if t.Hostname == "" || t.Protocol == "" {
 		return nil
+	}
+
+	// Web targets (the live map) are HTTP, not raw TCP: cloudflared's `access tcp`
+	// bridges a TCP stream, which an HTTP origin can't complete (the WebSocket
+	// bridge handshake fails). Serve them with an in-process reverse proxy instead.
+	if t.Web {
+		return t.startWeb(a)
 	}
 
 	t.lc.Lock()
@@ -761,6 +1215,82 @@ func (t *tunnel) start(a *App) error {
 	return nil
 }
 
+// startWeb serves a web target (the live map) with an in-process HTTP reverse
+// proxy instead of cloudflared. It listens on the same loopback IP:port a
+// cloudflared tunnel would (so the hosts-file redirect and Open Map URL are
+// unchanged) and forwards every request to https://<Hostname>, injecting the
+// Access service-token headers - exactly what authenticates a plain HTTPS GET.
+// This avoids `access tcp`, which can't bridge a raw TCP stream onto an HTTP
+// origin (the WebSocket handshake fails -> the browser sees a connection reset).
+func (t *tunnel) startWeb(a *App) error {
+	t.lc.Lock()
+	defer t.lc.Unlock()
+	if t.running {
+		return nil
+	}
+
+	t.setStatus(a, StatusStarting, "Starting map proxy…")
+	t.setLastErr("")
+
+	host := t.Hostname
+	id, secret := t.ServiceTokenID, t.ServiceTokenSecret
+	localURL := t.webURL()
+
+	proxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "https", Host: host})
+	baseDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		baseDirector(req)
+		req.Host = host // Cloudflare routes on Host and matches the Access app by it
+		if id != "" && secret != "" {
+			req.Header.Set("CF-Access-Client-Id", id)
+			req.Header.Set("CF-Access-Client-Secret", secret)
+		}
+	}
+	// Keep the browser on the branded local URL: rewrite any redirect that points
+	// back at the public (login-walled) hostname.
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		if loc := resp.Header.Get("Location"); loc != "" {
+			resp.Header.Set("Location", strings.Replace(loc, "https://"+host, localURL, 1))
+		}
+		return nil
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		t.setLastErr(err.Error())
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = fmt.Fprintln(w, "map proxy: could not reach the map -", err.Error())
+	}
+
+	ln, err := net.Listen("tcp", t.localAddr())
+	if err != nil {
+		t.setStatus(a, StatusError, "failed to bind "+t.localAddr()+": "+err.Error())
+		return err
+	}
+
+	srv := &http.Server{Handler: proxy}
+	t.websrv = srv
+	t.running = true
+	t.stopping = false
+
+	go func() {
+		serveErr := srv.Serve(ln)
+		t.lc.Lock()
+		t.running = false
+		stopping := t.stopping
+		t.lc.Unlock()
+		if stopping || errors.Is(serveErr, http.ErrServerClosed) {
+			t.setStatus(a, StatusStopped, "Disconnected")
+		} else {
+			t.setStatus(a, StatusError, "map proxy stopped: "+serveErr.Error())
+		}
+	}()
+
+	if a.log != nil {
+		a.log.line(t.Label, "system", "map proxy listening on "+t.localAddr()+" -> https://"+host)
+	}
+	t.setStatus(a, StatusConnected, "Connected")
+	return nil
+}
+
 // stop tears the process down. It signals "we asked for this" so the subsequent
 // exit is reported as a clean disconnect rather than an error.
 func (t *tunnel) stop(a *App) {
@@ -770,6 +1300,15 @@ func (t *tunnel) stop(a *App) {
 		return
 	}
 	t.stopping = true
+	// Web targets run an in-process HTTP server, not a child process.
+	if t.Web {
+		srv := t.websrv
+		t.lc.Unlock()
+		if srv != nil {
+			_ = srv.Close()
+		}
+		return
+	}
 	cmd, ctrl, cancel := t.cmd, t.ctrl, t.cancel
 	t.lc.Unlock()
 
@@ -862,9 +1401,28 @@ func (t *tunnel) inspectLine(a *App, line string) {
 				reason = rest[:j]
 			}
 		}
-		if strings.Contains(strings.ToLower(reason), "no such host") {
-			reason = t.Hostname + " is not published on the tunnel (no DNS record)"
+		lowReason := strings.ToLower(reason)
+
+		// A missing DNS record is a real, permanent misconfiguration - report it.
+		if strings.Contains(lowReason, "no such host") {
+			t.setStatus(a, StatusError,
+				"Can't reach server: "+t.Hostname+" is not published on the tunnel (no DNS record)")
+			return
 		}
+
+		// Transient edge/handshake hiccups (e.g. "websocket: bad handshake",
+		// resets, timeouts, EOF) happen on individual connections and clear on
+		// retry: cloudflared keeps the local listener up and the player reconnects
+		// fine. Don't flip a working tunnel to a sticky error over one of these -
+		// just remember it for exit logging and let the live ping (pingLoop) be the
+		// judge of whether the server is actually reachable.
+		if isTransientOriginErr(lowReason) {
+			t.setLastErr(strings.TrimSpace(line))
+			return
+		}
+
+		// A hard origin failure (connection refused, no route): surface it. The
+		// ping loop will clear it automatically as soon as the server answers again.
 		t.setStatus(a, StatusError, "Can't reach server: "+reason)
 		return
 	}
@@ -882,8 +1440,12 @@ func (t *tunnel) setStatus(a *App, status, message string) {
 	t.st.Lock()
 	t.status = status
 	t.message = message
+	discarded := t.discarded
 	t.st.Unlock()
-	if a != nil && a.ctx != nil {
+	// A discarded tunnel (removed by a live config change) must not emit UI events:
+	// its card is already gone, and a late "stopped" from stop() would recreate it
+	// as a ghost "Not connected" row. We still log the transition below.
+	if !discarded && a != nil && a.ctx != nil {
 		runtime.EventsEmit(a.ctx, "status", t.state())
 	}
 	// Mirror notable transitions to the file/Discord log as a rich embed (skip
@@ -898,6 +1460,36 @@ func (t *tunnel) setStatus(a *App, status, message string) {
 
 func (t *tunnel) currentStatus() string { t.st.Lock(); defer t.st.Unlock(); return t.status }
 
+// markDiscarded flags a tunnel as removed by a live config change, so any status
+// change from its (async) teardown is swallowed rather than re-rendering its card.
+func (t *tunnel) markDiscarded() { t.st.Lock(); t.discarded = true; t.st.Unlock() }
+
+// isRunning reports whether the cloudflared child is still up (its local listener
+// is live), so a ping to it is worth attempting.
+func (t *tunnel) isRunning() bool { t.lc.Lock(); defer t.lc.Unlock(); return t.running }
+
+// isTransientOriginErr reports whether a cloudflared "failed to connect to
+// origin" reason is a per-connection hiccup that clears on retry, rather than a
+// persistent failure worth surfacing as an error. lowReason must be lower-cased.
+func isTransientOriginErr(lowReason string) bool {
+	for _, s := range []string{
+		"bad handshake",
+		"connection reset",
+		"reset by peer",
+		"broken pipe",
+		"timeout",
+		"timed out",
+		"i/o timeout",
+		"eof",
+		"temporarily unavailable",
+	} {
+		if strings.Contains(lowReason, s) {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *tunnel) setLastErr(s string) { t.st.Lock(); t.lastErr = s; t.st.Unlock() }
 func (t *tunnel) getLastErr() string  { t.st.Lock(); defer t.st.Unlock(); return t.lastErr }
 
@@ -905,6 +1497,10 @@ func (t *tunnel) state() TargetState {
 	t.st.Lock()
 	status, message := t.status, t.message
 	t.st.Unlock()
+	webURL := ""
+	if t.Web {
+		webURL = t.webURL()
+	}
 	return TargetState{
 		ID:        t.ID,
 		Label:     t.Label,
@@ -914,6 +1510,9 @@ func (t *tunnel) state() TargetState {
 		LocalAddr: t.displayAddr(),
 		Status:    status,
 		Message:   message,
+		Web:       t.Web,
+		WebURL:    webURL,
+		CoupledTo: t.CoupledTo,
 	}
 }
 

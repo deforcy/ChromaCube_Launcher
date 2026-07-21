@@ -1,3 +1,10 @@
+@font-face {
+  font-family: "Minecraft";
+  src: url("minecraft.woff2") format("woff2"),
+       url("minecraft.woff") format("woff");
+  font-display: swap;
+}
+
 :root {
   --bg: #111217;
   --panel: #1a1c25;
@@ -130,15 +137,55 @@ h1 { font-size: 17px; margin: 0; }
 .card {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 14px;
-  padding: 14px 16px;
+  padding: 12px 16px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
 }
-.card-info { min-width: 0; }
+.card-info { flex: 0 1 auto; min-width: 0; }
 .card-info h3 { margin: 0; font-size: 14px; }
+.card-name { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.card-name h3 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.players {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex: none;
+}
+
+/* Server icon (favicon from the Server List Ping), rendered pixel-crisp. */
+.server-icon {
+  width: 42px;
+  height: 42px;
+  flex: none;
+  border-radius: 7px;
+  object-fit: cover;
+  background: var(--panel-2);
+  image-rendering: pixelated;
+}
+
+/* MOTD, drawn like Minecraft's server list: up to two unwrapped lines in the
+   Minecraft font, keeping the server's own spacing (used to centre lines) and
+   colours. Each line is its own row (see renderMotdHtml), and white-space: pre
+   preserves the padding spaces so the layout matches the game. */
+.motd {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: "Minecraft", "Cascadia Code", Consolas, monospace;
+  font-size: 16px;
+  line-height: 1.25;
+  color: var(--text);
+  text-align: center;
+}
+.motd-line {
+  white-space: pre;
+  overflow: hidden;
+}
+/* Unicode small-caps are mapped to real capitals and scaled down so they read as
+   Minecraft-style small caps in the bundled font. */
+.motd .sc { font-size: 0.82em; }
 .card-title { display: flex; align-items: center; gap: 8px; }
 .card-title h3 { margin: 0; font-size: 14px; }
 .proto {
@@ -157,9 +204,36 @@ h1 { font-size: 17px; margin: 0; }
 
 .card-right { display: flex; align-items: center; gap: 14px; }
 
-/* Status indicator */
-.status { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 120px; }
-.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+/* Status indicator. The dot is a fixed pivot: the ping (left) grows leftward and
+   the status text (right) grows rightward, so the dot never shifts as text
+   changes length. A three-column grid (equal side columns, auto centre) keeps
+   the dot centred within a fixed-width block. */
+.status {
+  flex: 0 0 auto;
+  width: 210px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  column-gap: 8px;
+  font-size: 12px;
+}
+.status .ping {
+  justify-self: end;
+  text-align: right;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status .status-text {
+  justify-self: start;
+  text-align: left;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; justify-self: center; }
 .dot.idle, .dot.stopped { background: var(--muted); }
 .dot.starting, .dot.waiting_auth { background: var(--amber); animation: pulse 1s infinite; }
 .dot.connected { background: var(--green); box-shadow: 0 0 8px var(--green); }
@@ -246,6 +320,23 @@ h1 { font-size: 17px; margin: 0; }
 .code-input:focus { outline: none; border-color: var(--accent); }
 .code-screen .btn-big { max-width: 360px; }
 .code-error { color: var(--red); font-size: 12px; margin: 0; max-width: 360px; }
+/* Revocation notice on the code screen (amber, distinct from the red error). */
+.code-notice {
+  color: var(--amber);
+  font-size: 13px;
+  margin: 0;
+  max-width: 360px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(245,185,92,0.10);
+  border: 1px solid var(--amber);
+}
+
+/* "Open Map" button on a web-target card sits at the far right of the row. */
+/* "Open Map" button embedded in the coupled server's card: it sits just left of
+   the status block (which stays pinned right), and never grows/shrinks so the
+   status position is identical to cards without a map button. */
+.map-open { flex: none; white-space: nowrap; padding: 7px 14px; }
 
 #main-ui { display: flex; flex-direction: column; gap: 14px; flex: 1; min-height: 0; }
 

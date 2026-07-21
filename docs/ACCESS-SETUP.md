@@ -121,3 +121,7 @@ A plain `wails build` (no code) stays a **developer build** that uses the local
 - Remove a code from the Worker (or KV) -> that exe can no longer fetch a config.
 - Delete/rotate a service token in Cloudflare -> that group is cut off at the
   network layer immediately, even with a cached config.
+- **Live effect (v1.4.0+):** a *running* launcher re-fetches its config every 30 s,
+  so a server you revoke in the admin panel is force-disconnected in the app, and a
+  fully revoked code drops the user back to the code screen — no restart needed.
+  See `docs/MAP-AND-LIVE-ACCESS.md`.

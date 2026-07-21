@@ -4,6 +4,30 @@
 //   GET /download       -> redirect to the current build
 // Users are managed by the admin panel (admin/); KV is the source of truth.
 
+// The web map follows the ChromaCube grant. Rather than writing the map target
+// into every user's stored config (a KV write per user, and easy to miss for
+// users created before the map existed), we INJECT it at read time for anyone
+// whose config already unlocks ChromaCube. The map's Access policy is still
+// attached to the token by the admin panel; this only adds the launcher-visible
+// target so the Open Map button appears. Keep these fields in sync with
+// admin-worker.js `mapTarget()`.
+const MAP_COUPLED_HOST = "chromacube.deforce.site";
+const MAP_TARGET = {
+  label: "ChromaCube Map",
+  hostname: "map.deforce.site",
+  protocol: "tcp",
+  mcHost: "map.chromacube.localhost",
+  web: true,
+  webPort: 80,
+  coupledTo: MAP_COUPLED_HOST,
+};
+
+// How stale the recorded access has to be before we write a fresh _access entry.
+// The launcher re-fetches config every 30s; without this throttle each active
+// launcher would burn ~2,880 KV writes/day (free tier is 1,000/day) and lock out
+// all writes, including admin edits.
+const ACCESS_WRITE_THROTTLE_MS = 15 * 60 * 1000;
+
 export default {
   async fetch(request, env, ctx) {
     if (request.method !== "GET") {
@@ -59,16 +83,38 @@ export default {
     }
 
     // Record when/where this code was last used so the admin panel can show
-    // last-access + IP. We write the FULL value (with _admin) back to KV in the
-    // background via waitUntil so it never delays the launcher's response.
-    const admin = cfg._admin || (cfg._admin = {});
-    const loc = request.cf || {};
-    admin.lastAccess = new Date().toISOString();
-    admin.lastIp = request.headers.get("CF-Connecting-IP") || "";
-    admin.lastLocation = [loc.city, loc.region, loc.country].filter(Boolean).join(", ");
-    admin.accessCount = (admin.accessCount || 0) + 1;
+    // last-access + IP. This goes to a SEPARATE key ("_access:<code>"), never the
+    // config value itself: rewriting the config here would race the admin panel
+    // under KV's eventual consistency and could clobber a just-saved server change.
     if (ctx && ctx.waitUntil) {
-      ctx.waitUntil(env.LAUNCHER.put(code, JSON.stringify(cfg)));
+      const loc = request.cf || {};
+      const ip = request.headers.get("CF-Connecting-IP") || "";
+      ctx.waitUntil(
+        (async () => {
+          let acc = {};
+          try {
+            const r = await env.LAUNCHER.get("_access:" + code);
+            if (r) acc = JSON.parse(r);
+          } catch (_) {}
+          // Throttle: only write if it's been a while OR the IP changed. The
+          // launcher polls every 30s, so writing every time would exhaust the
+          // daily KV write quota and lock out admin edits.
+          const last = Date.parse(acc.lastAccess || "") || 0;
+          const stale = Date.now() - last >= ACCESS_WRITE_THROTTLE_MS;
+          const ipChanged = ip && ip !== acc.lastIp;
+          if (!stale && !ipChanged) return;
+          acc.lastAccess = new Date().toISOString();
+          acc.lastIp = ip;
+          acc.lastLocation = [loc.city, loc.region, loc.country].filter(Boolean).join(", ");
+          acc.accessCount = (acc.accessCount || 0) + 1;
+          try {
+            await env.LAUNCHER.put("_access:" + code, JSON.stringify(acc));
+          } catch (_) {
+            // Out of daily write budget (or KV hiccup): drop it. Access logging
+            // is best-effort and must never break the config response.
+          }
+        })()
+      );
     }
 
     // Strip admin-only bookkeeping (token id / policy ids / access log) before
@@ -76,6 +122,17 @@ export default {
     // token/targets.
     const out = { ...cfg };
     delete out._admin;
+
+    // Auto-attach the web map for anyone who unlocks ChromaCube, without needing
+    // a per-user KV write. If chromacube is present and the map target isn't
+    // already there, add it so the launcher shows the Open Map button.
+    const targets = Array.isArray(out.targets) ? out.targets.slice() : [];
+    const hasChromacube = targets.some((t) => t && t.hostname === MAP_COUPLED_HOST);
+    const hasMap = targets.some((t) => t && (t.web === true || t.hostname === MAP_TARGET.hostname));
+    if (hasChromacube && !hasMap) {
+      targets.push({ ...MAP_TARGET });
+      out.targets = targets;
+    }
     return json(out, 200);
   },
 };

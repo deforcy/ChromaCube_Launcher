@@ -13,6 +13,15 @@
       "hostname": "hbm.deforce.site",
       "protocol": "tcp",
       "mcHost": "hbm"
+    },
+    {
+      "label": "ChromaCube Map",
+      "hostname": "map.deforce.site",
+      "protocol": "tcp",
+      "mcHost": "map.chromacube.localhost",
+      "web": true,
+      "webPort": 80,
+      "coupledTo": "chromacube.deforce.site"
     }
   ]
 }

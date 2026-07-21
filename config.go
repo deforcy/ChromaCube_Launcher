@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,6 +11,12 @@ import (
 	"strings"
 	"time"
 )
+
+// errCodeRevoked is returned by fetchRemoteConfig when the endpoint reports the
+// code is unknown (HTTP 404) - i.e. the user's access was revoked (or the code
+// was mistyped). The live config-refresh loop uses this to send the user back to
+// the access-code entry screen.
+var errCodeRevoked = errors.New("this access code is no longer valid")
 
 // Target describes one Cloudflare Access route the launcher can open.
 type Target struct {
@@ -30,6 +37,22 @@ type Target struct {
 	// LocalPort (localhost mode): only used when McHost is empty. cloudflared
 	// binds 127.0.0.1:<LocalPort> and the player types "localhost:<LocalPort>".
 	LocalPort int `json:"localPort"`
+
+	// Web marks an HTTP target that is opened in a browser (e.g. the live map)
+	// instead of joined in Minecraft. It is served exactly like a hostname-mode
+	// target - a branded local name (McHost) mapped through the hosts file to a
+	// loopback IP where the authenticated cloudflared proxy listens - but on
+	// WebPort and with no Server List Ping. The launcher shows an "Open Map"
+	// button that points a browser at http://<McHost>.
+	Web bool `json:"web,omitempty"`
+	// WebPort is the local port a web target binds. Defaults to 80 so the branded
+	// hostname needs no ":port" suffix. Ignored for non-web targets.
+	WebPort int `json:"webPort,omitempty"`
+	// CoupledTo (web targets only) is the Hostname of the Minecraft target this web
+	// target belongs to (e.g. the map is coupled to "chromacube.deforce.site"). The
+	// UI hides the web target's own card and instead shows an "Open Map" button on
+	// the coupled server's card. Empty means it renders as its own standalone card.
+	CoupledTo string `json:"coupledTo,omitempty"`
 
 	// ServiceTokenID/Secret authenticate this route to Cloudflare Access without
 	// a browser login (headless). If empty, the top-level token (if any) is used;
@@ -117,6 +140,9 @@ func fetchRemoteConfig(dataDir, code string) (Config, error) {
 		return Config{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return Config{}, errCodeRevoked
+	}
 	if resp.StatusCode != http.StatusOK {
 		return Config{}, fmt.Errorf("remote config returned HTTP %d", resp.StatusCode)
 	}
@@ -174,6 +200,11 @@ func parseConfig(data []byte) (Config, error) {
 		}
 		if t.Hostname == "" {
 			return Config{}, fmt.Errorf("target %q: hostname is required", t.Label)
+		}
+		// Web targets are served in hostname mode (branded local name) on WebPort,
+		// which defaults to 80 so the browser needs no ":port".
+		if t.Web && t.WebPort == 0 {
+			t.WebPort = 80
 		}
 		// Either hostname mode (McHost) or localhost mode (LocalPort) must be valid.
 		if t.McHost == "" {

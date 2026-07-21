@@ -28,6 +28,39 @@ const SERVERS = {
   },
 };
 
+// The live web map (squaremap). It is a normal Cloudflare Access self-hosted app
+// (map.deforce.site) but is NOT a checkbox in the panel: access always follows
+// the "chromacube" grant. Whenever a user is given chromacube, we attach their
+// service token to the map app and add a `web` target the launcher opens in a
+// browser at http://map.chromacube. Removing chromacube removes the map too.
+const MAP = {
+  coupledTo: "chromacube",
+  label: "ChromaCube Map",
+  hostname: "map.deforce.site", // Access app hostname (tunnel -> http://localhost:8080)
+  // Branded local name the launcher opens in a browser. The `.localhost` suffix is
+  // required: browsers resolve *.localhost to 127.0.0.1 natively (RFC 6761), which
+  // survives Secure DNS/DoH - a plain hosts-file name does NOT (fetch/XHR fail with
+  // ERR_NAME_NOT_RESOLVED). The launcher binds the map proxy on 127.0.0.1.
+  mcHost: "map.chromacube.localhost",
+  protocol: "tcp",
+  web: true,
+  webPort: 80,
+};
+
+// mapTarget is the launcher-visible target for the web map.
+function mapTarget() {
+  return {
+    label: MAP.label,
+    hostname: MAP.hostname,
+    protocol: MAP.protocol,
+    mcHost: MAP.mcHost,
+    web: true,
+    webPort: MAP.webPort,
+    // The launcher embeds the Open Map button into this server's card.
+    coupledTo: SERVERS[MAP.coupledTo].hostname,
+  };
+}
+
 // Cache of hostname -> Access Application ID, resolved on demand from the API.
 const appIdCache = {};
 
@@ -64,6 +97,9 @@ export default {
       }
       if (path.endsWith("/api/users/servers") && request.method === "POST") {
         return json(await updateUserServers(env, await request.json()));
+      }
+      if (path.endsWith("/api/users/bulk") && request.method === "POST") {
+        return json(await bulkUpdateServers(env, await request.json()));
       }
       if (path.endsWith("/api/users/delete") && request.method === "POST") {
         return json(await deleteUser(env, await request.json()));
@@ -142,21 +178,25 @@ async function listUsers(env) {
   do {
     const list = await env.LAUNCHER.list(cursor ? { cursor } : undefined);
     for (const k of list.keys) {
-      if (k.name.startsWith("_meta")) continue; // reserved (e.g. version manifest)
+      if (k.name.startsWith("_")) continue; // reserved (_meta:version, _access:<code>)
       const raw = await env.LAUNCHER.get(k.name);
       if (!raw) continue;
       let cfg = {};
       try { cfg = JSON.parse(raw); } catch (_) { continue; }
       const a = cfg._admin || {};
+      // Access bookkeeping lives in a separate key so launcher polls never rewrite
+      // the config (see launcher-worker). Fall back to legacy _admin fields.
+      let acc = {};
+      try { const r = await env.LAUNCHER.get("_access:" + k.name); if (r) acc = JSON.parse(r); } catch (_) {}
       out.push({
         code: k.name,
         displayName: cfg.displayName || "",
         servers: a.servers || (cfg.targets || []).map((t) => t.label),
         createdAt: a.createdAt || "",
-        lastAccess: a.lastAccess || "",
-        lastIp: a.lastIp || "",
-        lastLocation: a.lastLocation || "",
-        accessCount: a.accessCount || 0,
+        lastAccess: acc.lastAccess || a.lastAccess || "",
+        lastIp: acc.lastIp || a.lastIp || "",
+        lastLocation: acc.lastLocation || a.lastLocation || "",
+        accessCount: acc.accessCount || a.accessCount || 0,
       });
     }
     cursor = list.list_complete ? undefined : list.cursor;
@@ -207,6 +247,25 @@ async function createUser(env, body) {
     targets.push({ label: s.label, hostname: s.hostname, protocol: s.protocol, mcHost: s.mcHost });
   }
 
+  // 2b. Auto-grant the web map alongside ChromaCube. Best-effort: if the map's
+  //     Access app isn't set up yet we still create the user (just without the
+  //     map) and report a warning rather than failing the whole request.
+  let mapWarning = "";
+  if (serverKeys.includes(MAP.coupledTo)) {
+    try {
+      const mapAppId = await resolveAppId(env, MAP.hostname);
+      const policy = await cf(env, "POST", `/accounts/${accountId}/access/apps/${mapAppId}/policies`, {
+        name: "launcher " + code + " (map)",
+        decision: "non_identity",
+        include: [{ service_token: { token_id: token.id } }],
+      });
+      policies.push({ appId: mapAppId, policyId: policy.id, map: true });
+      targets.push(mapTarget());
+    } catch (e) {
+      mapWarning = "user created, but the map could not be linked: " + (e && e.message ? e.message : e);
+    }
+  }
+
   // 3. Write the KV entry the launcher reads (plus _admin metadata for revoke).
   const value = {
     displayName,
@@ -223,7 +282,7 @@ async function createUser(env, body) {
   };
   await env.LAUNCHER.put(code, JSON.stringify(value));
 
-  return { code, displayName, servers: serverKeys };
+  return { code, displayName, servers: serverKeys, warning: mapWarning };
 }
 
 // updateUserServers changes which servers an existing code unlocks, reusing the
@@ -279,15 +338,99 @@ async function updateUserServers(env, body) {
     policies.push({ appId, policyId: policy.id });
   }
 
-  // Rebuild the launcher-visible targets from the final server set.
+  // Keep the web map in lockstep with ChromaCube: add its policy when chromacube
+  // is (now) granted, remove it when chromacube is dropped. Best-effort on the
+  // map app so a missing map app never blocks a server change.
+  let mapWarning = "";
+  const wantMap = want.has(MAP.coupledTo);
+  try {
+    const mapAppId = await resolveAppId(env, MAP.hostname);
+    const hasMapPolicy = policies.some((p) => p.appId === mapAppId);
+    if (wantMap && !hasMapPolicy) {
+      const policy = await cf(env, "POST", `/accounts/${accountId}/access/apps/${mapAppId}/policies`, {
+        name: "launcher " + code + " (map)",
+        decision: "non_identity",
+        include: [{ service_token: { token_id: tokenId } }],
+      });
+      policies.push({ appId: mapAppId, policyId: policy.id, map: true });
+    } else if (!wantMap && hasMapPolicy) {
+      const keep = [];
+      for (const p of policies) {
+        if (p.appId === mapAppId) {
+          try {
+            await cf(env, "DELETE", `/accounts/${accountId}/access/apps/${mapAppId}/policies/${p.policyId}`);
+          } catch (_) {}
+        } else {
+          keep.push(p);
+        }
+      }
+      policies = keep;
+    }
+  } catch (e) {
+    if (wantMap) mapWarning = "servers updated, but the map could not be linked: " + (e && e.message ? e.message : e);
+  }
+
+  // Rebuild the launcher-visible targets from the final server set (+ the map).
   value.targets = serverKeys.map((key) => {
     const s = SERVERS[key];
     return { label: s.label, hostname: s.hostname, protocol: s.protocol, mcHost: s.mcHost };
   });
+  if (wantMap) value.targets.push(mapTarget());
   value._admin = { ...admin, policies, servers: serverKeys };
   await env.LAUNCHER.put(code, JSON.stringify(value));
 
-  return { ok: true, code, servers: serverKeys };
+  return { ok: true, code, servers: serverKeys, warning: mapWarning };
+}
+
+// bulkUpdateServers grants or revokes ONE server for many users in a single call,
+// reusing updateUserServers per user (so policies + the coupled map stay in sync).
+// codes empty -> apply to every user. Revoke is skipped for a user it would leave
+// with no servers (revoke the whole user instead).
+async function bulkUpdateServers(env, body) {
+  const server = (body.server || "").trim();
+  const action = (body.action || "").trim();
+  if (!SERVERS[server]) throw new Error("unknown server: " + server);
+  if (action !== "grant" && action !== "revoke") throw new Error("action must be 'grant' or 'revoke'");
+
+  let codes = Array.isArray(body.codes) ? body.codes.map((c) => String(c).trim()).filter(Boolean) : [];
+  if (codes.length === 0) {
+    codes = (await listUsers(env)).map((u) => u.code);
+  }
+
+  const results = [];
+  for (const code of codes) {
+    try {
+      const raw = await env.LAUNCHER.get(code);
+      if (!raw) { results.push({ code, status: "skipped", reason: "unknown code" }); continue; }
+      const value = JSON.parse(raw);
+      const current = new Set((value._admin && value._admin.servers) || []);
+      const had = current.has(server);
+      if (action === "grant") {
+        if (had) { results.push({ code, status: "unchanged" }); continue; }
+        current.add(server);
+      } else {
+        if (!had) { results.push({ code, status: "unchanged" }); continue; }
+        if (current.size <= 1) {
+          results.push({ code, status: "skipped", reason: "would leave the user with no servers" });
+          continue;
+        }
+        current.delete(server);
+      }
+      const r = await updateUserServers(env, { code, servers: [...current] });
+      results.push({ code, status: "updated", warning: r.warning || "" });
+    } catch (e) {
+      results.push({ code, status: "error", reason: String(e && e.message ? e.message : e) });
+    }
+  }
+
+  const count = (s) => results.filter((r) => r.status === s).length;
+  return {
+    ok: true,
+    server,
+    action,
+    summary: { updated: count("updated"), unchanged: count("unchanged"), skipped: count("skipped"), errors: count("error") },
+    results,
+  };
 }
 
 async function deleteUser(env, body) {
@@ -305,6 +448,7 @@ async function deleteUser(env, body) {
     try { await cf(env, "DELETE", `/accounts/${accountId}/access/service_tokens/${meta.tokenId}`); } catch (_) {}
   }
   await env.LAUNCHER.delete(code);
+  await env.LAUNCHER.delete("_access:" + code); // its access-bookkeeping key
   return { ok: true, code };
 }
 
@@ -367,6 +511,8 @@ const PAGE = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
   .card{background:#1a1c25;border:1px solid #2c2f3c;border-radius:12px;padding:16px;max-width:720px;margin-bottom:16px;}
   label{display:block;font-size:12px;color:#9aa0b2;margin:8px 0 4px;}
   input[type=text]{width:100%;padding:9px 11px;border-radius:8px;border:1px solid #2c2f3c;background:#21242f;color:#e7e9f0;box-sizing:border-box;}
+  select{padding:9px 11px;border-radius:8px;border:1px solid #2c2f3c;background:#21242f;color:#e7e9f0;margin-right:10px;}
+  textarea{width:100%;padding:9px 11px;border-radius:8px;border:1px solid #2c2f3c;background:#21242f;color:#e7e9f0;box-sizing:border-box;font-family:inherit;font-size:13px;resize:vertical;}
   .servers label{display:inline-flex;align-items:center;gap:6px;color:#e7e9f0;margin-right:16px;font-size:14px;}
   button{cursor:pointer;border:1px solid #6c8cff;background:#6c8cff;color:#0c1020;padding:9px 14px;border-radius:8px;font-weight:600;margin-top:12px;}
   button.danger{background:transparent;border-color:#ff6b6b;color:#ff6b6b;padding:4px 10px;margin:0;font-weight:600;}
@@ -392,6 +538,16 @@ const PAGE = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
 </div>
 
 <div class="card">
+  <h2 style="margin-top:0">Bulk access</h2>
+  <p class="muted" style="margin:0 0 6px">Grant or revoke one server for many users at once. Tick users in the table below to target just them, or leave every box unticked to apply to <b>all</b> users. The map follows ChromaCube automatically. Revoke is skipped for anyone it would leave with no servers.</p>
+  <label>Server</label>
+  <select id="bulkServer"></select>
+  <select id="bulkAction"><option value="grant">Grant</option><option value="revoke">Revoke</option></select>
+  <button id="bulkApply">Apply</button>
+  <div id="bulkMsg" class="msg"></div>
+</div>
+
+<div class="card">
   <h2 style="margin-top:0">App version (forced update)</h2>
   <p class="muted" style="margin:0 0 6px">Set the latest version and where the new build is hosted. Launchers older than this are locked and cannot connect until the user installs it. Leave version blank to disable the gate.</p>
   <label>Latest version</label>
@@ -400,6 +556,8 @@ const PAGE = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
   <input id="verurl" type="text" placeholder="https://.../ChromaCube.exe"/>
   <label>SHA-256 (optional) - run: certutil -hashfile ChromaCube.exe SHA256</label>
   <input id="versha" type="text" placeholder="64 hex characters, or leave blank"/>
+  <label>Release notes - shown in the "What's new" popup after a user updates to this version</label>
+  <textarea id="vernotes" rows="4" placeholder="e.g. Live map now opens reliably; fixed duplicate server cards."></textarea>
   <button id="saveVer">Save version</button>
   <div id="vermsg" class="msg"></div>
   <p class="muted" style="margin:10px 0 0">Permanent link to share / inside the app (always points to the current build):<br/>
@@ -408,6 +566,7 @@ const PAGE = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
 
 <h2>Users</h2>
 <table><thead><tr>
+  <th><input type="checkbox" id="selAll" title="Select all"/></th>
   <th>Code</th><th>Name</th><th>Servers</th><th>Issued</th><th>Last seen</th><th>IP / location</th><th></th>
 </tr></thead>
 <tbody id="rows"></tbody></table>
@@ -427,13 +586,17 @@ async function loadServers(){
   SERVERS_CACHE = servers;
   document.getElementById('servers').innerHTML = servers.map(s=>
     '<label><input type="checkbox" value="'+esc(s.key)+'"> '+esc(s.label)+'</label>').join('');
+  document.getElementById('bulkServer').innerHTML = servers.map(s=>
+    '<option value="'+esc(s.key)+'">'+esc(s.label)+'</option>').join('');
 }
 async function loadUsers(){
   const {users} = await api('api/users');
   for (const k in USERS) delete USERS[k];
   users.forEach(u=>{ USERS[u.code]=u; });
   document.getElementById('rows').innerHTML = users.map(row).join('') ||
-    '<tr><td colspan="7" class="muted">No users yet.</td></tr>';
+    '<tr><td colspan="8" class="muted">No users yet.</td></tr>';
+  const selAll = document.getElementById('selAll');
+  if (selAll) selAll.checked = false;
 }
 function row(u){
   const ip = u.lastIp
@@ -443,6 +606,7 @@ function row(u){
     ? fmt(u.lastAccess) + (u.accessCount ? ' <span class="muted">('+u.accessCount+'x)</span>' : '')
     : '<span class="muted">never</span>';
   return '<tr id="r-'+esc(u.code)+'">'+
+    '<td><input type="checkbox" class="usel" value="'+esc(u.code)+'"></td>'+
     '<td><code>'+esc(u.code)+'</code></td>'+
     '<td>'+esc(u.displayName)+'</td>'+
     '<td class="srv">'+(u.servers||[]).map(k=>esc(srvLabel(k))).join(', ')+'</td>'+
@@ -471,7 +635,7 @@ window.saveServers = async function(code){
   if(!cell) return;
   const servers = [...cell.querySelectorAll('input:checked')].map(c=>c.value);
   if(servers.length===0){ alert('Pick at least one server.'); return; }
-  try{ await api('api/users/servers','POST',{code,servers}); await loadUsers(); }
+  try{ const r = await api('api/users/servers','POST',{code,servers}); if(r.warning) alert(r.warning); await loadUsers(); }
   catch(e){ alert(e.message); }
 };
 function fmt(iso){ try{ return new Date(iso).toLocaleString(); }catch(_){ return esc(iso); } }
@@ -483,7 +647,8 @@ document.getElementById('create').onclick = async ()=>{
   msg.textContent=''; msg.className='msg';
   try{
     const r = await api('api/users','POST',{displayName:name, servers});
-    msg.innerHTML = 'Created. Give them this code: <code>'+r.code+'</code>';
+    msg.innerHTML = 'Created. Give them this code: <code>'+esc(r.code)+'</code>'+
+      (r.warning ? '<br/><span class="err">'+esc(r.warning)+'</span>' : '');
     msg.classList.add('ok');
     document.getElementById('name').value='';
     document.querySelectorAll('#servers input:checked').forEach(c=>c.checked=false);
@@ -495,18 +660,42 @@ async function del(code){
   try{ await api('api/users/delete','POST',{code}); loadUsers(); }
   catch(e){ alert(e.message); }
 }
+document.addEventListener('change', (e)=>{
+  if(e.target && e.target.id==='selAll'){
+    document.querySelectorAll('.usel').forEach(c=>{ c.checked = e.target.checked; });
+  }
+});
+document.getElementById('bulkApply').onclick = async ()=>{
+  const server = document.getElementById('bulkServer').value;
+  const action = document.getElementById('bulkAction').value;
+  const codes = [...document.querySelectorAll('.usel:checked')].map(c=>c.value);
+  const scope = codes.length ? (codes.length+' selected user(s)') : 'ALL users';
+  if(!confirm(action.toUpperCase()+' '+srvLabel(server)+' for '+scope+'?')) return;
+  const msg = document.getElementById('bulkMsg'); msg.textContent='Working...'; msg.className='msg';
+  try{
+    const r = await api('api/users/bulk','POST',{server,action,codes});
+    const s = r.summary;
+    let html = 'Done: '+s.updated+' updated, '+s.unchanged+' unchanged, '+s.skipped+' skipped, '+s.errors+' errors.';
+    const bad = r.results.filter(x=>x.status==='error'||x.status==='skipped');
+    if(bad.length) html += '<br/><span class="muted">'+esc(bad.map(x=>x.code+': '+(x.reason||'')).join('; '))+'</span>';
+    msg.innerHTML = html; msg.classList.add(s.errors?'err':'ok');
+    loadUsers();
+  }catch(e){ msg.textContent=e.message; msg.classList.add('err'); }
+};
 async function loadVersion(){
   const m = await api('api/version');
   document.getElementById('ver').value = m.latest||'';
   document.getElementById('verurl').value = m.url||'';
   document.getElementById('versha').value = m.sha256||'';
+  document.getElementById('vernotes').value = m.notes||'';
 }
 document.getElementById('saveVer').onclick = async ()=>{
   const latest = document.getElementById('ver').value.trim();
   const url = document.getElementById('verurl').value.trim();
   const sha256 = document.getElementById('versha').value.trim();
+  const notes = document.getElementById('vernotes').value.trim();
   const msg = document.getElementById('vermsg'); msg.textContent=''; msg.className='msg';
-  try{ await api('api/version','POST',{latest,url,sha256}); msg.textContent='Saved. Older launchers will now be prompted to update.'; msg.classList.add('ok'); }
+  try{ await api('api/version','POST',{latest,url,sha256,notes}); msg.textContent='Saved. Older launchers will now be prompted to update.'; msg.classList.add('ok'); }
   catch(e){ msg.textContent=e.message; msg.classList.add('err'); }
 };
 loadServers(); loadUsers(); loadVersion();

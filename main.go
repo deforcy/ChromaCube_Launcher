@@ -2,11 +2,26 @@ package main
 
 import (
 	"embed"
+	"net/http"
+	"os"
+	"path/filepath"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
+
+// noCacheMiddleware tells WebView2 never to cache our embedded assets, so a
+// rebuilt binary's new JS/CSS always loads instead of a stale cached copy.
+func noCacheMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+		next.ServeHTTP(w, r)
+	})
+}
 
 // assets embeds the whole frontend. The directory must contain an index.html.
 // Wails serves these files and automatically injects its JS runtime and the
@@ -48,7 +63,13 @@ func main() {
 		MinHeight:   460,
 		StartHidden: startHidden,
 		AssetServer: &assetserver.Options{
-			Assets: assets,
+			Assets:     assets,
+			Middleware: noCacheMiddleware,
+		},
+		// Per-version WebView2 data dir: a new build starts with a fresh asset
+		// cache, so updated JS/CSS can never be shadowed by a previously cached copy.
+		Windows: &windows.Options{
+			WebviewUserDataPath: filepath.Join(os.TempDir(), "ChromaCubeLauncher-webview-"+appVersion),
 		},
 		BackgroundColour: &options.RGBA{R: 17, G: 18, B: 23, A: 1},
 		OnStartup:        app.startup,
