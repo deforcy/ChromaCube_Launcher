@@ -30,7 +30,14 @@ const (
 	StatusIdle        = "idle"
 	StatusStarting    = "starting"
 	StatusWaitingAuth = "waiting_auth"
-	StatusConnected   = "connected"
+	// StatusChecking means cloudflared's local listener is up but we have not yet
+	// confirmed the real Minecraft server behind it answers a Server List Ping.
+	StatusChecking  = "checking"
+	StatusConnected = "connected"
+	// StatusUnreachable means the tunnel itself is fine (cloudflared is up) but the
+	// Minecraft server behind it does not answer - distinct from StatusError, which
+	// means the tunnel/cloudflared side itself is broken.
+	StatusUnreachable = "unreachable"
 	StatusError       = "error"
 	StatusStopped     = "stopped"
 )
@@ -254,7 +261,7 @@ func mcBindPort(t Target) int {
 		if t.WebPort > 0 {
 			return t.WebPort
 		}
-		return 80
+		return defaultWebPort
 	}
 	return mcDefaultPort
 }
@@ -491,8 +498,8 @@ func (a *App) emitUpdateProgress(message string, busy bool) {
 // pingLoop measures latency to each running server every few seconds via a
 // Server List Ping and emits "ping" events ({id, ms, motd, ...}; ms = -1 means
 // unreachable). It also treats a successful ping as ground truth that the server
-// is reachable: if the tunnel got stuck showing an error after a transient
-// cloudflared hiccup, a good ping clears it back to "connected".
+// is reachable: if the tunnel got stuck showing an error (or "unreachable")
+// after a transient hiccup, a good ping clears it back to "connected".
 func (a *App) pingLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -503,31 +510,50 @@ func (a *App) pingLoop() {
 				continue
 			}
 			st := t.currentStatus()
-			// Ping while the local listener is up (connected) or wrongly stuck in
-			// error - the ping is what tells us which one it really is.
-			if !t.isRunning() || (st != StatusConnected && st != StatusError) {
+			// Ping while the local listener is up (connected/checking) or wrongly
+			// stuck in error/unreachable - the ping is what tells us which one it
+			// really is.
+			if !t.isRunning() || (st != StatusConnected && st != StatusChecking &&
+				st != StatusError && st != StatusUnreachable) {
 				continue
 			}
-			go func(t *tunnel) {
-				status, err := pingServer(t.localAddr())
-				payload := map[string]interface{}{"id": t.ID, "ms": -1}
-				if err == nil {
-					payload["ms"] = status.Ms
-					payload["motd"] = status.Motd
-					payload["playersOnline"] = status.PlayersOn
-					payload["playersMax"] = status.PlayersMax
-					payload["version"] = status.Version
-					payload["favicon"] = status.Favicon
-					// The server answered, so any earlier error was transient.
-					if t.currentStatus() == StatusError && t.isRunning() {
-						t.setStatus(a, StatusConnected, "Connected")
-					}
-				}
-				if a.ctx != nil {
-					runtime.EventsEmit(a.ctx, "ping", payload)
-				}
-			}(t)
+			go a.pingOnce(t)
 		}
+	}
+}
+
+// pingOnce performs a single Server List Ping against t, emits the resulting
+// "ping" event ({id, ms, motd, ...}; ms = -1 means unreachable), and updates
+// t's status to match reality:
+//   - a successful ping while checking/error/unreachable promotes to Connected
+//     (the real server answered, so any earlier problem has cleared)
+//   - a failed ping while connected/checking demotes to Unreachable (cloudflared's
+//     tunnel is fine, but the Minecraft server behind it is not answering)
+func (a *App) pingOnce(t *tunnel) {
+	status, err := pingServer(t.localAddr())
+	if !t.isRunning() {
+		return
+	}
+	payload := map[string]interface{}{"id": t.ID, "ms": -1}
+	if err == nil {
+		payload["ms"] = status.Ms
+		payload["motd"] = status.Motd
+		payload["playersOnline"] = status.PlayersOn
+		payload["playersMax"] = status.PlayersMax
+		payload["version"] = status.Version
+		payload["favicon"] = status.Favicon
+		switch t.currentStatus() {
+		case StatusError, StatusUnreachable, StatusChecking:
+			t.setStatus(a, StatusConnected, "Connected")
+		}
+	} else {
+		switch t.currentStatus() {
+		case StatusConnected, StatusChecking:
+			t.setStatus(a, StatusUnreachable, "Unreachable")
+		}
+	}
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "ping", payload)
 	}
 }
 
@@ -1381,11 +1407,14 @@ func (t *tunnel) inspectLine(a *App, line string) {
 	}
 
 	// cloudflared prints something like "Start Websocket listener on: 127.0.0.1:PORT"
-	// once the local proxy is up and ready to accept the game client.
+	// once the local proxy is up and ready to accept the game client. That only
+	// means the tunnel itself is up, not that the real Minecraft server behind it
+	// is answering - so check before claiming "Connected" instead of assuming it.
 	if strings.Contains(low, "start websocket listener") ||
 		strings.Contains(low, "start serving") ||
 		strings.Contains(low, "listening on") {
-		t.setStatus(a, StatusConnected, "Connected")
+		t.setStatus(a, StatusChecking, "Checking connection…")
+		go a.pingOnce(t)
 		return
 	}
 
@@ -1421,9 +1450,10 @@ func (t *tunnel) inspectLine(a *App, line string) {
 			return
 		}
 
-		// A hard origin failure (connection refused, no route): surface it. The
-		// ping loop will clear it automatically as soon as the server answers again.
-		t.setStatus(a, StatusError, "Can't reach server: "+reason)
+		// A hard origin failure (connection refused, no route): the tunnel itself
+		// is fine, the Minecraft server behind it just isn't answering. The ping
+		// loop will clear this back to Connected as soon as the server answers again.
+		t.setStatus(a, StatusUnreachable, "Unreachable")
 		return
 	}
 
@@ -1452,7 +1482,7 @@ func (t *tunnel) setStatus(a *App, status, message string) {
 	// the noisy transient "starting" state).
 	if a != nil && a.log != nil {
 		switch status {
-		case StatusConnected, StatusWaitingAuth, StatusError, StatusStopped:
+		case StatusConnected, StatusWaitingAuth, StatusUnreachable, StatusError, StatusStopped:
 			a.log.statusEmbed(t.Label, t.displayAddr(), status, message)
 		}
 	}

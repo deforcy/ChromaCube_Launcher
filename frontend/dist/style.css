@@ -235,13 +235,13 @@ h1 { font-size: 17px; margin: 0; }
 }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; justify-self: center; }
 .dot.idle, .dot.stopped { background: var(--muted); }
-.dot.starting, .dot.waiting_auth { background: var(--amber); animation: pulse 1s infinite; }
+.dot.starting, .dot.waiting_auth, .dot.checking { background: var(--amber); animation: pulse 1s infinite; }
 .dot.connected { background: var(--green); box-shadow: 0 0 8px var(--green); }
-.dot.error { background: var(--red); }
+.dot.error, .dot.unreachable { background: var(--red); }
 .status-text { color: var(--muted); }
 .status-text.connected { color: var(--green); }
-.status-text.error { color: var(--red); }
-.status-text.waiting_auth { color: var(--amber); }
+.status-text.error, .status-text.unreachable { color: var(--red); }
+.status-text.waiting_auth, .status-text.checking { color: var(--amber); }
 
 /* Live ping */
 .ping { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }

@@ -45,8 +45,10 @@ type Target struct {
 	// WebPort and with no Server List Ping. The launcher shows an "Open Map"
 	// button that points a browser at http://<McHost>.
 	Web bool `json:"web,omitempty"`
-	// WebPort is the local port a web target binds. Defaults to 80 so the branded
-	// hostname needs no ":port" suffix. Ignored for non-web targets.
+	// WebPort is the local port a web target binds. Defaults to defaultWebPort
+	// (80 on Windows, so the branded hostname needs no ":port" suffix; a high
+	// port elsewhere, since binding 80 needs root there). Ignored for non-web
+	// targets.
 	WebPort int `json:"webPort,omitempty"`
 	// CoupledTo (web targets only) is the Hostname of the Minecraft target this web
 	// target belongs to (e.g. the map is coupled to "chromacube.deforce.site"). The
@@ -202,9 +204,10 @@ func parseConfig(data []byte) (Config, error) {
 			return Config{}, fmt.Errorf("target %q: hostname is required", t.Label)
 		}
 		// Web targets are served in hostname mode (branded local name) on WebPort,
-		// which defaults to 80 so the browser needs no ":port".
+		// which defaults to defaultWebPort (80 on Windows, so the browser needs no
+		// ":port"; a high port elsewhere, since binding 80 there needs root).
 		if t.Web && t.WebPort == 0 {
-			t.WebPort = 80
+			t.WebPort = defaultWebPort
 		}
 		// Either hostname mode (McHost) or localhost mode (LocalPort) must be valid.
 		if t.McHost == "" {
