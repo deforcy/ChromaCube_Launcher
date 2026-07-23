@@ -12,6 +12,38 @@ let whatsNewShown = false; // the post-update popup is shown once per launch
 // Characters used to animate obfuscated (§k) MOTD text, à la Minecraft.
 const OBF_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789!?#@%&*+=";
 
+// Splash-text lines shown under the title on the code-entry screen, à la the
+// Minecraft main menu. One is picked at random per launch (module load), not
+// re-rolled on every re-render, so it stays put for the whole session.
+const SPLASH_TEXTS = [
+  "Time to play!",
+  "Also try connecting!",
+  "100% cube-approved!",
+  "Now with more chroma!",
+  "Diamonds not included!",
+  "Tunnels, not portals!",
+  "No lag, just love!",
+  "Connect and conquer!",
+  "Cloudflare-powered!",
+  "Fresh from the nether!",
+  "Server's up, jump in!",
+  "Loaded with chunks of fun!",
+  "Fewer bugs than a farm!",
+  "Made of pure chroma!",
+  "Now rendering reality!",
+  "Boots on, ready to go!",
+  "Tick tock, next tick!",
+  "Whitelisted and ready!",
+  "Cubed for your pleasure!",
+  "Connecting the blocks!",
+  "Better than bedrock!",
+  "Straight outta spawn!",
+  "One click, zero grief!",
+  "Chroma-tastic!",
+  "Now on Bedrock too!",
+];
+const splashText = SPLASH_TEXTS[Math.floor(Math.random() * SPLASH_TEXTS.length)];
+
 function whenReady(fn) {
   if (window.runtime && window.go && window.go.main && window.go.main.App) {
     fn();
@@ -242,7 +274,7 @@ function renderFromState(state) {
   if (state.needsCode) {
     codeScreen.classList.remove("hidden");
     mainUI.classList.add("hidden");
-    document.getElementById("subtitle").textContent = "Private Minecraft network access";
+    document.getElementById("subtitle").textContent = splashText;
     return;
   }
   codeScreen.classList.add("hidden");
