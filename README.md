@@ -28,4 +28,4 @@ quietly in the system tray so you can reconnect any time.
 
 ## Need help?
 
-If something is not working, reach out to the server owner.
+If something is not working, reach out to me (@deforce_).
