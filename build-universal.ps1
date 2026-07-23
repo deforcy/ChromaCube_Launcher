@@ -9,7 +9,7 @@
 
 param(
   [string]$Name = "ChromaCube-Launcher",
-  [string]$Version = "1.0.0",
+  [string]$Version = "1.5.0",
   [string]$RemoteURL = ""
 )
 
