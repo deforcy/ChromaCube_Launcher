@@ -68,3 +68,11 @@ func commitHostsFile(path string, data []byte) error {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// appleScriptString renders s as a quoted AppleScript string literal, escaping
+// the backslash and double-quote characters that would otherwise terminate it.
+func appleScriptString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
+}

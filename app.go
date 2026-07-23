@@ -403,7 +403,7 @@ func (a *App) checkUpdate() {
 	if newlyRequired {
 		a.DisconnectAll()
 		if a.ctx != nil {
-			runtime.WindowShow(a.ctx)
+			runtime.Show(a.ctx)
 		}
 	}
 }
@@ -561,7 +561,7 @@ func (a *App) pingOnce(t *tunnel) {
 // for a new version (so reopening from the tray behaves like a fresh check).
 func (a *App) showWindow() {
 	if a.ctx != nil {
-		runtime.WindowShow(a.ctx)
+		runtime.Show(a.ctx)
 		go a.checkUpdate()
 	}
 }
@@ -785,7 +785,7 @@ func (a *App) handleRevoked() {
 		runtime.EventsEmit(a.ctx, "revoked",
 			map[string]string{"message": "Your access was revoked. Enter a new code to continue."})
 		runtime.EventsEmit(a.ctx, "reloaded", a.GetState())
-		runtime.WindowShow(a.ctx)
+		runtime.Show(a.ctx)
 	}
 }
 
@@ -910,16 +910,20 @@ func (a *App) quitApp() {
 	}
 }
 
-// beforeClose runs on the UI thread when the window's close button is pressed.
-// We hide to the tray and keep running, unless the user explicitly chose "Close"
-// from the tray menu (reallyQuit), in which case we let the close proceed.
+// beforeClose runs on the UI thread for a close/quit attempt. On Windows this
+// fires for the window's close button too, so we hide to the tray and keep
+// running unless the user explicitly chose "Close" from the tray menu
+// (reallyQuit). On macOS, hideWindowOnClose diverts the close button straight
+// to a native app-hide (see closebehavior_darwin.go), so by the time this hook
+// runs it is always a genuine quit (Cmd+Q, Dock "Quit", or the app menu) - let
+// it proceed instead of hiding an already-hidden app.
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
-	if a.reallyQuit {
+	if a.reallyQuit || hideWindowOnClose {
 		return false
 	}
-	runtime.WindowHide(ctx)
+	runtime.Hide(ctx)
 	go func() {
-		if err := notify("ChromaCube Launcher", "Still running in the tray. Right-click the tray icon and choose Close to quit."); err != nil {
+		if err := notify("ChromaCube Launcher", backgroundHint()); err != nil {
 			a.log.line("system", "notify", "notification failed: "+err.Error())
 		}
 	}()

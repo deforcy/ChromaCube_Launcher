@@ -56,12 +56,13 @@ func main() {
 	// Wails owns the main goroutine / UI thread. All process management happens
 	// in the App, driven by the bound methods and the lifecycle hooks below.
 	err := wails.Run(&options.App{
-		Title:       "ChromaCube Launcher",
-		Width:       920,
-		Height:      560,
-		MinWidth:    720,
-		MinHeight:   460,
-		StartHidden: startHidden,
+		Title:             "ChromaCube Launcher",
+		Width:             920,
+		Height:            560,
+		MinWidth:          720,
+		MinHeight:         460,
+		StartHidden:       startHidden,
+		HideWindowOnClose: hideWindowOnClose,
 		AssetServer: &assetserver.Options{
 			Assets:     assets,
 			Middleware: noCacheMiddleware,
