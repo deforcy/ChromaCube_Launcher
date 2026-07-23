@@ -357,9 +357,9 @@ function overallState() {
   const list = [...targets.values()].filter((t) => t.id !== "config-error" && !t.web);
   if (list.length === 0) return "idle";
   const statuses = list.map((t) => t.status);
-  if (statuses.some((s) => s === "starting" || s === "waiting_auth")) return "connecting";
+  if (statuses.some((s) => s === "starting" || s === "waiting_auth" || s === "checking")) return "connecting";
   if (statuses.some((s) => s === "connected")) return "connected";
-  if (statuses.some((s) => s === "error")) return "error";
+  if (statuses.some((s) => s === "error" || s === "unreachable")) return "error";
   return "idle";
 }
 
@@ -392,7 +392,9 @@ const STATUS_LABEL = {
   idle: "Not connected",
   starting: "Connecting...",
   waiting_auth: "Waiting for sign-in...",
+  checking: "Checking connection...",
   connected: "Connected",
+  unreachable: "Unreachable",
   error: "Error",
   stopped: "Not connected",
 };
@@ -422,7 +424,12 @@ function renderCard(t) {
     list.appendChild(card);
   }
 
-  const active = t.status === "connected" || t.status === "starting" || t.status === "waiting_auth";
+  const active =
+    t.status === "connected" ||
+    t.status === "starting" ||
+    t.status === "waiting_auth" ||
+    t.status === "checking" ||
+    t.status === "unreachable";
   const label = STATUS_LABEL[t.status] || t.status;
   const statusText = active && t.message ? t.message : label;
   const isError = t.id === "config-error";

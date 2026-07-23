@@ -20,7 +20,6 @@
       "protocol": "tcp",
       "mcHost": "map.chromacube.localhost",
       "web": true,
-      "webPort": 80,
       "coupledTo": "chromacube.deforce.site"
     }
   ]

@@ -44,7 +44,6 @@ const MAP = {
   mcHost: "map.chromacube.localhost",
   protocol: "tcp",
   web: true,
-  webPort: 80,
 };
 
 // mapTarget is the launcher-visible target for the web map.
@@ -55,7 +54,6 @@ function mapTarget() {
     protocol: MAP.protocol,
     mcHost: MAP.mcHost,
     web: true,
-    webPort: MAP.webPort,
     // The launcher embeds the Open Map button into this server's card.
     coupledTo: SERVERS[MAP.coupledTo].hostname,
   };

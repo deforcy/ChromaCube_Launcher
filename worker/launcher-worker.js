@@ -18,7 +18,6 @@ const MAP_TARGET = {
   protocol: "tcp",
   mcHost: "map.chromacube.localhost",
   web: true,
-  webPort: 80,
   coupledTo: MAP_COUPLED_HOST,
 };
 
