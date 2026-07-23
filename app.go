@@ -357,8 +357,13 @@ func (a *App) startup(ctx context.Context) {
 
 	// Install the hosts-file redirections for hostname-mode targets (only once we
 	// have a config; otherwise this happens when the user submits their code).
+	// Runs in its own goroutine: on macOS this can block on a Touch ID/password
+	// prompt, and cloudflared binds its local listener directly by IP (not by
+	// the branded hostname), so nothing below needs to wait for it - without
+	// this, a slow/unnoticed prompt stalls checkUpdate/ensureBinary/ConnectAll
+	// too, leaving the UI stuck on "Checking cloudflared…" indefinitely.
 	if !a.needsCode {
-		a.installHosts()
+		go a.installHosts()
 	}
 
 	// Check for a forced update first. If this build is behind, lock the UI and
@@ -942,8 +947,12 @@ func (a *App) shutdown(ctx context.Context) {
 	a.stopTray() // remove the tray icon so it does not linger after we exit
 	a.DisconnectAll()
 	// During a self-update the freshly launched instance owns the hosts block, so
-	// the outgoing process must not strip it out from under the new one.
-	if !a.skipHostsCleanup {
+	// the outgoing process must not strip it out from under the new one. On
+	// platforms where cleaning up costs nothing (Windows, already elevated) we
+	// still do it so no orphaned entry lingers; where it would cost a fresh
+	// elevation prompt on every future launch (macOS) we leave it in place - see
+	// cleanupHostsOnQuit.
+	if !a.skipHostsCleanup && cleanupHostsOnQuit {
 		a.removeHosts()
 	}
 	a.log.sessionEnd()
@@ -1188,6 +1197,15 @@ func (t *tunnel) start(a *App) error {
 
 	t.setStatus(a, StatusStarting, "Starting cloudflared…")
 	t.setLastErr("")
+
+	// Hostname-mode targets past the first each get their own loopback IP
+	// (127.0.0.2, ...); on macOS that address must be aliased onto lo0 before
+	// anything can bind it (see ensureLoopbackAlias), unlike Windows/Linux
+	// where the whole 127.0.0.0/8 block just works.
+	if err := ensureLoopbackAlias(t.BindIP); err != nil {
+		t.setStatus(a, StatusError, err.Error())
+		return err
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
