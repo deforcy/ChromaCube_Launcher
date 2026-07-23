@@ -46,7 +46,16 @@ html, body {
   align-items: center;
   justify-content: space-between;
 }
-.brand { display: flex; align-items: center; gap: 12px; }
+.header-left { display: flex; align-items: center; gap: 16px; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
 .logo {
   width: 44px; height: 44px;
   border-radius: 11px;
@@ -122,6 +131,7 @@ h1 { font-size: 17px; margin: 0; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #0c1020; }
 .btn-danger { background: transparent; border-color: var(--red); color: var(--red); }
+.btn-warning { background: transparent; border-color: var(--amber); color: var(--amber); }
 
 /* Server cards */
 .server-list {
@@ -307,7 +317,7 @@ h1 { font-size: 17px; margin: 0; }
   justify-content: center;
   gap: 10px;
 }
-.change-code { color: var(--accent); cursor: pointer; }
+.change-code { color: var(--accent); cursor: pointer; text-decoration: none; }
 .app-version { color: var(--muted); font-size: 11px; opacity: 0.7; }
 
 /* Access-code entry screen */
@@ -362,32 +372,48 @@ h1 { font-size: 17px; margin: 0; }
 /* Header right cluster */
 .header-right { display: flex; align-items: center; gap: 10px; }
 
-/* Tabs: sit between the brand and the header-right cluster, sharing the space
-   evenly with the rest of the header. */
+/* Tabs: sit right next to the brand box (not centred in the header), in their
+   own bordered container. A single sliding indicator underlines whichever tab
+   is active instead of each tab carrying its own background/border. */
 .tabs {
-  flex: 1;
+  position: relative;
   display: flex;
-  justify-content: center;
-  gap: 6px;
-  margin: 0 16px;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
 }
 .tab {
+  position: relative;
+  z-index: 1;
   cursor: pointer;
   display: flex;
   align-items: center;
   gap: 7px;
   padding: 8px 16px;
-  border-radius: 9px;
-  border: 1px solid transparent;
+  border-radius: 8px;
+  border: none;
   background: transparent;
   color: var(--muted);
   font-size: 13px;
   font-weight: 600;
-  transition: filter 0.15s, color 0.15s, background 0.15s;
+  transition: color 0.15s;
 }
 .tab:hover { color: var(--text); }
-.tab.active { background: var(--panel-2); border-color: var(--border); color: var(--text); }
+.tab.active { color: var(--text); }
 .tab-icon { font-size: 14px; line-height: 1; }
+.tab-indicator {
+  position: absolute;
+  left: 0;
+  bottom: 4px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: left 0.25s ease, width 0.25s ease;
+  pointer-events: none;
+}
 
 /* Settings view */
 .settings-screen {

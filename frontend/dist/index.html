@@ -9,21 +9,24 @@
 <body>
   <div class="app">
     <header class="app-header">
-      <div class="brand">
-        <img class="logo" src="appicon.png" alt="CC" />
-        <div>
-          <h1>ChromaCube Launcher</h1>
-          <p id="subtitle" class="subtitle">Private minecraft server</p>
+      <div class="header-left">
+        <div class="brand">
+          <img class="logo" src="appicon.png" alt="CC" />
+          <div>
+            <h1>ChromaCube Launcher</h1>
+            <p id="subtitle" class="subtitle">Private minecraft server</p>
+          </div>
         </div>
+        <nav class="tabs" role="tablist">
+          <span id="tab-indicator" class="tab-indicator"></span>
+          <button id="tab-servers" class="tab active" data-tab="servers" role="tab" aria-selected="true">
+            <span class="tab-icon">&#9638;</span> Servers
+          </button>
+          <button id="tab-settings" class="tab" data-tab="settings" role="tab" aria-selected="false">
+            <span class="tab-icon">&#9881;</span> Settings
+          </button>
+        </nav>
       </div>
-      <nav class="tabs" role="tablist">
-        <button id="tab-servers" class="tab active" data-tab="servers" role="tab" aria-selected="true">
-          <span class="tab-icon">&#9638;</span> Servers
-        </button>
-        <button id="tab-settings" class="tab" data-tab="settings" role="tab" aria-selected="false">
-          <span class="tab-icon">&#9881;</span> Settings
-        </button>
-      </nav>
       <div class="header-right">
         <div id="binary-pill" class="pill pill-amber">Checking cloudflared...</div>
       </div>
