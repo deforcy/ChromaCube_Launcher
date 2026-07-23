@@ -16,18 +16,22 @@
           <p id="subtitle" class="subtitle">Private minecraft server</p>
         </div>
       </div>
+      <nav class="tabs" role="tablist">
+        <button id="tab-servers" class="tab active" data-tab="servers" role="tab" aria-selected="true">
+          <span class="tab-icon">&#9638;</span> Servers
+        </button>
+        <button id="tab-settings" class="tab" data-tab="settings" role="tab" aria-selected="false">
+          <span class="tab-icon">&#9881;</span> Settings
+        </button>
+      </nav>
       <div class="header-right">
-        <button id="settings-btn" class="icon-btn" title="Settings">&#9881;</button>
         <div id="binary-pill" class="pill pill-amber">Checking cloudflared...</div>
       </div>
     </header>
 
     <!-- Settings view -->
     <section id="settings-screen" class="settings-screen hidden">
-      <div class="settings-head">
-        <h2>Settings</h2>
-        <button id="settings-back" class="btn btn-ghost btn-mini">Back</button>
-      </div>
+      <h2>Settings</h2>
       <label class="toggle-row">
         <input type="checkbox" id="autostart-toggle" />
         <span>Start automatically when Windows starts</span>
