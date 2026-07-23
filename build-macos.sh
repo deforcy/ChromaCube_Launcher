@@ -24,7 +24,7 @@
 # want a smaller download for one CPU type.
 #
 # Optional environment variables (mirror the Windows build-*.ps1 scripts):
-#   VERSION=1.2.0      version string baked into the binary (default 1.4.3)
+#   VERSION=1.2.0      version string baked into the binary (default 1.5.0)
 #   CODE=sv-7h3k       bake a group access code (like build-group.ps1). If unset,
 #                      a UNIVERSAL-config build is produced that prompts each user
 #                      for their personal code on first launch (like
@@ -41,7 +41,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 TARGET="${1:-universal}"
-VERSION="${VERSION:-1.4.3}"
+VERSION="${VERSION:-1.5.0}"
 
 case "$TARGET" in
   universal|"")               PLATFORM="darwin/universal" ;;
