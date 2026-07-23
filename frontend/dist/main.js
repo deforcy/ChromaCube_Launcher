@@ -52,8 +52,6 @@ function whenReady(fn) {
   }
 }
 
-whenReady(init);
-
 function init() {
   const App = window.go.main.App;
 
@@ -128,7 +126,7 @@ function init() {
   // Single network button toggles all tunnels.
   document.getElementById("connect-btn").onclick = () => {
     const state = overallState();
-    if (state === "connected" || state === "connecting") {
+    if (state === "connected" || state === "unreachable" || state === "connecting") {
       hideAuthBanner();
       App.DisconnectAll();
     } else {
@@ -181,6 +179,10 @@ function init() {
   // Animate any obfuscated (§k) MOTD glyphs like Minecraft does.
   setInterval(scrambleObfuscated, 90);
 
+  // Position the sliding tab indicator under "Servers" (the default active
+  // tab) now that the header has actually been laid out.
+  updateTabIndicator();
+
   App.GetState().then(renderFromState);
 }
 
@@ -225,7 +227,19 @@ function setActiveTab(tab) {
   document.getElementById("tab-settings").classList.toggle("active", tab === "settings");
   document.getElementById("tab-servers").setAttribute("aria-selected", tab === "servers");
   document.getElementById("tab-settings").setAttribute("aria-selected", tab === "settings");
+  updateTabIndicator();
   applyActiveTab();
+}
+
+// Slides the underline indicator to sit under whichever tab is active. Uses
+// offsetLeft/offsetWidth relative to .tabs (its positioned ancestor), so it
+// naturally tracks each button's real rendered position/width.
+function updateTabIndicator() {
+  const btn = document.getElementById(activeTab === "settings" ? "tab-settings" : "tab-servers");
+  const indicator = document.getElementById("tab-indicator");
+  if (!btn || !indicator) return;
+  indicator.style.left = btn.offsetLeft + "px";
+  indicator.style.width = btn.offsetWidth + "px";
 }
 
 // applyActiveTab shows whichever screen the current tab + connection state
@@ -307,7 +321,7 @@ function renderFromState(state) {
 
   // Header subtitle shows who this build is for.
   if (state.displayName) {
-    document.getElementById("subtitle").textContent = state.displayName;
+    document.getElementById("subtitle").textContent = "Logged in as: " + state.displayName;
   }
   // "Change code" only makes sense for code-mode builds.
   document.getElementById("change-code").classList.toggle("hidden", !state.codeMode);
@@ -381,7 +395,12 @@ function overallState() {
   const statuses = list.map((t) => t.status);
   if (statuses.some((s) => s === "starting" || s === "waiting_auth" || s === "checking")) return "connecting";
   if (statuses.some((s) => s === "connected")) return "connected";
-  if (statuses.some((s) => s === "error" || s === "unreachable")) return "error";
+  // Unreachable means the tunnel itself is up (cloudflared connected fine) and
+  // only the Minecraft server behind it isn't answering - that's still a real
+  // connection, so it gets its own state distinct from "error" (tunnel/auth
+  // actually broken) rather than looking like nothing happened.
+  if (statuses.some((s) => s === "unreachable")) return "unreachable";
+  if (statuses.some((s) => s === "error")) return "error";
   return "idle";
 }
 
@@ -389,11 +408,16 @@ function refreshConnectButton() {
   const btn = document.getElementById("connect-btn");
   const state = overallState();
 
-  btn.classList.remove("btn-primary", "btn-danger", "btn-busy");
+  btn.classList.remove("btn-primary", "btn-danger", "btn-busy", "btn-warning");
   switch (state) {
     case "connected":
       btn.textContent = "Disconnect from network";
       btn.classList.add("btn-danger");
+      btn.disabled = false;
+      break;
+    case "unreachable":
+      btn.textContent = "Unable to reach server";
+      btn.classList.add("btn-warning");
       btn.disabled = false;
       break;
     case "connecting":
@@ -786,3 +810,15 @@ function truncate(s, n) {
   s = String(s || "");
   return s.length > n ? s.slice(0, n - 1) + "..." : s;
 }
+
+// This must be the LAST statement in the file: if window.go.main.App is
+// already available the moment this runs, init() executes synchronously right
+// here (not on a later tick), and its synchronous body can trigger callbacks
+// (e.g. a buffered "status" event replayed by EventsOn) that call functions
+// like renderCard - which reference const declarations (STATUS_LABEL, etc.)
+// further down in this file. A const isn't initialized until its own
+// declaration line actually runs, so calling those functions before the
+// script has finished executing top to bottom throws "Cannot access
+// uninitialized variable". Keeping this call last guarantees every top-level
+// const/function in the file is already initialized before init() can run.
+whenReady(init);
