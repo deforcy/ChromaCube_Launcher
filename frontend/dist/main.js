@@ -146,9 +146,14 @@ function init() {
     App.ClearAccessCode();
   };
 
-  // Settings tab.
-  document.getElementById("settings-btn").onclick = openSettings;
-  document.getElementById("settings-back").onclick = () => App.GetState().then(renderFromState);
+  // Header tabs.
+  document.getElementById("tab-servers").onclick = () => setActiveTab("servers");
+  document.getElementById("tab-settings").onclick = () => {
+    setActiveTab("settings");
+    App.GetSettings().then((s) => {
+      document.getElementById("autostart-toggle").checked = !!s.autostart;
+    });
+  };
   document.getElementById("autostart-toggle").onchange = (e) => {
     App.SetAutostart(e.target.checked).catch((err) => console.error(err));
   };
@@ -209,14 +214,36 @@ function showWhatsNew(d) {
   document.getElementById("whatsnew-screen").classList.remove("hidden");
 }
 
-function openSettings() {
-  const App = window.go.main.App;
-  document.getElementById("code-screen").classList.add("hidden");
-  document.getElementById("main-ui").classList.add("hidden");
-  document.getElementById("settings-screen").classList.remove("hidden");
-  App.GetSettings().then((s) => {
-    document.getElementById("autostart-toggle").checked = !!s.autostart;
-  });
+// activeTab persists across state refreshes (e.g. the periodic "reloaded"
+// event) so a live config update never yanks the user out of Settings.
+let activeTab = "servers"; // "servers" | "settings"
+let lastNeedsCode = false; // set by renderFromState; used when re-applying the tab
+
+function setActiveTab(tab) {
+  activeTab = tab;
+  document.getElementById("tab-servers").classList.toggle("active", tab === "servers");
+  document.getElementById("tab-settings").classList.toggle("active", tab === "settings");
+  document.getElementById("tab-servers").setAttribute("aria-selected", tab === "servers");
+  document.getElementById("tab-settings").setAttribute("aria-selected", tab === "settings");
+  applyActiveTab();
+}
+
+// applyActiveTab shows whichever screen the current tab + connection state
+// call for: Settings, or (depending on whether a code is needed yet) the code
+// entry screen vs. the server list.
+function applyActiveTab() {
+  const settingsScreen = document.getElementById("settings-screen");
+  const codeScreen = document.getElementById("code-screen");
+  const mainUI = document.getElementById("main-ui");
+  if (activeTab === "settings") {
+    settingsScreen.classList.remove("hidden");
+    codeScreen.classList.add("hidden");
+    mainUI.classList.add("hidden");
+    return;
+  }
+  settingsScreen.classList.add("hidden");
+  codeScreen.classList.toggle("hidden", !lastNeedsCode);
+  mainUI.classList.toggle("hidden", lastNeedsCode);
 }
 
 function submitCode() {
@@ -268,17 +295,12 @@ function renderFromState(state) {
     ? "ChromaCube Launcher " + verText
     : "";
 
-  document.getElementById("settings-screen").classList.add("hidden");
-  const codeScreen = document.getElementById("code-screen");
-  const mainUI = document.getElementById("main-ui");
+  lastNeedsCode = state.needsCode;
+  applyActiveTab();
   if (state.needsCode) {
-    codeScreen.classList.remove("hidden");
-    mainUI.classList.add("hidden");
     document.getElementById("subtitle").textContent = splashText;
     return;
   }
-  codeScreen.classList.add("hidden");
-  mainUI.classList.remove("hidden");
   // We're online: clear any lingering revocation notice.
   const notice = document.getElementById("code-notice");
   if (notice) notice.classList.add("hidden");
@@ -453,7 +475,7 @@ function renderCard(t) {
         </div>` : ""}
     </div>
     <div class="motd"></div>
-    ${web ? mapButtonHtml(web) : ""}
+    ${web ? mapButtonHtml(web, t.status === "unreachable") : ""}
     <div class="status">
       <span class="ping"></span>
       <span class="dot ${t.status}"></span>
@@ -490,9 +512,13 @@ function webChildOf(t) {
 }
 
 // The "Open Map" button HTML. It shows "Opening..." while a connect-then-open is
-// in flight (see openMap).
-function mapButtonHtml(web) {
+// in flight (see openMap). If the coupled Minecraft server is unreachable, the
+// map is disabled too rather than suggesting it might still work.
+function mapButtonHtml(web, parentUnreachable) {
   const opening = pendingMapOpen.has(web.id);
+  if (parentUnreachable && !opening) {
+    return `<button class="btn btn-primary map-open" disabled title="The server is unreachable right now">Unreachable</button>`;
+  }
   const lbl = opening ? "Opening..." : "Open Map";
   return `<button class="btn btn-primary map-open"${opening ? " disabled" : ""}>${lbl}</button>`;
 }

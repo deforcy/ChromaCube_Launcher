@@ -42,6 +42,11 @@ const (
 	StatusStopped     = "stopped"
 )
 
+// checkConnectionFloor is the minimum time "Checking connection…" stays on
+// screen before the first post-connect ping is allowed to resolve it, so a
+// near-instant reply doesn't make the check look like it never happened.
+const checkConnectionFloor = 700 * time.Millisecond
+
 // urlRegexp extracts the first http(s) URL from a cloudflared log line.
 var urlRegexp = regexp.MustCompile(`https?://[^\s"'<>]+`)
 
@@ -1418,7 +1423,16 @@ func (t *tunnel) inspectLine(a *App, line string) {
 		strings.Contains(low, "start serving") ||
 		strings.Contains(low, "listening on") {
 		t.setStatus(a, StatusChecking, "Checking connection…")
-		go a.pingOnce(t)
+		go func() {
+			// A local Minecraft server answers almost instantly, which would flip
+			// straight to "Connected" before the user ever registers "Checking
+			// connection…" happened. Hold the state for a floor duration so the
+			// check is actually visible; this only delays the UI update, not the
+			// ping itself, and pingOnce takes at least as long as pingTimeout when
+			// the server doesn't answer at all.
+			time.Sleep(checkConnectionFloor)
+			a.pingOnce(t)
+		}()
 		return
 	}
 

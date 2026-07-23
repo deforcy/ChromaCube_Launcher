@@ -121,9 +121,7 @@ h1 { font-size: 17px; margin: 0; }
 .btn:hover { filter: brightness(1.15); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #0c1020; }
-.btn-ghost { background: transparent; }
 .btn-danger { background: transparent; border-color: var(--red); color: var(--red); }
-.btn-mini { padding: 3px 9px; font-size: 11px; }
 
 /* Server cards */
 .server-list {
@@ -229,15 +227,38 @@ h1 { font-size: 17px; margin: 0; }
   justify-self: start;
   text-align: left;
   min-width: 0;
+  /* Wrap onto up to 2 lines instead of a single truncated line - short phrases
+     like "Checking connection..." were getting clipped at the fixed column
+     width. Anything that still overflows past 2 lines gets an ellipsis. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: break-word;
+  line-height: 1.25;
 }
-.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; justify-self: center; }
+.dot { position: relative; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; justify-self: center; }
 .dot.idle, .dot.stopped { background: var(--muted); }
-.dot.starting, .dot.waiting_auth, .dot.checking { background: var(--amber); animation: pulse 1s infinite; }
+.dot.starting, .dot.waiting_auth, .dot.checking { background: var(--amber); }
 .dot.connected { background: var(--green); box-shadow: 0 0 8px var(--green); }
 .dot.error, .dot.unreachable { background: var(--red); }
+/* Shimmering wave pulse: a ring expands out from the dot and fades, in the
+   dot's own colour (inherited from the rules above). Idle/stopped stay static. */
+.dot.starting::after, .dot.waiting_auth::after, .dot.checking::after,
+.dot.connected::after, .dot.error::after, .dot.unreachable::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background-color: inherit;
+  animation: dot-wave 1.8s ease-out infinite;
+}
+@keyframes dot-wave {
+  0%   { transform: scale(1);   opacity: 0.55; }
+  100% { transform: scale(2.8); opacity: 0; }
+}
 .status-text { color: var(--muted); }
 .status-text.connected { color: var(--green); }
 .status-text.error, .status-text.unreachable { color: var(--red); }
@@ -248,8 +269,6 @@ h1 { font-size: 17px; margin: 0; }
 .ping.good { color: var(--green); }
 .ping.ok   { color: var(--amber); }
 .ping.bad  { color: var(--red); }
-
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 /* Logs */
 .logs {
@@ -340,20 +359,35 @@ h1 { font-size: 17px; margin: 0; }
 
 #main-ui { display: flex; flex-direction: column; gap: 14px; flex: 1; min-height: 0; }
 
-/* Header right cluster + settings gear */
+/* Header right cluster */
 .header-right { display: flex; align-items: center; gap: 10px; }
-.icon-btn {
-  cursor: pointer;
-  width: 34px; height: 34px;
-  display: grid; place-items: center;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 16px;
-  transition: filter 0.15s, color 0.15s;
+
+/* Tabs: sit between the brand and the header-right cluster, sharing the space
+   evenly with the rest of the header. */
+.tabs {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin: 0 16px;
 }
-.icon-btn:hover { filter: brightness(1.2); color: var(--text); }
+.tab {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 16px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  transition: filter 0.15s, color 0.15s, background 0.15s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { background: var(--panel-2); border-color: var(--border); color: var(--text); }
+.tab-icon { font-size: 14px; line-height: 1; }
 
 /* Settings view */
 .settings-screen {
@@ -362,8 +396,7 @@ h1 { font-size: 17px; margin: 0; }
   flex-direction: column;
   gap: 16px;
 }
-.settings-head { display: flex; align-items: center; justify-content: space-between; }
-.settings-head h2 { margin: 0; font-size: 16px; }
+.settings-screen h2 { margin: 0; font-size: 16px; }
 .toggle-row {
   display: flex;
   align-items: center;
